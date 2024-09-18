@@ -78,23 +78,3 @@ pub fn transmute_from_u8<T>(v: &[u8]) -> &T {
 pub fn transmute_to_u8<T>(v: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts(ptr::from_ref::<T>(v).cast::<u8>(), mem::size_of_val(v)) }
 }
-
-pub fn transmute_from_u8_to_slice<T>(data: &[u8]) -> &[T] {
-    debug_assert_eq!(data.len() % size_of::<T>(), 0);
-
-    debug_assert_eq!(
-        data.as_ptr().align_offset(align_of::<T>()),
-        0,
-        "transmuting byte slice {:p} into slice of {}: \
-         required alignment is {} bytes, \
-         byte slice misaligned by {} bytes",
-        data.as_ptr(),
-        std::any::type_name::<T>(),
-        align_of::<T>(),
-        data.as_ptr().align_offset(align_of::<T>()),
-    );
-
-    let len = data.len() / size_of::<T>();
-    let ptr = data.as_ptr().cast::<T>();
-    unsafe { std::slice::from_raw_parts(ptr, len) }
-}

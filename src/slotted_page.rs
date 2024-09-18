@@ -98,20 +98,24 @@ impl SlottedPageMmap {
         values
     }
 
-    pub(crate) fn new(path: &Path, page_size: usize) -> SlottedPageMmap {
+    fn persist_page_header(&mut self) {
+        self.mmap[0..16].copy_from_slice(transmute_to_u8(&self.header));
+    }
+
+    pub fn new(path: &Path, page_size: usize) -> SlottedPageMmap {
         create_and_ensure_length(path, page_size).unwrap();
-        let mut mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
+        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header = SlottedPageHeader {
             slot_count: 0,
             data_start_offset: page_size as u64,
         };
-        // save header
-        mmap[0..16].copy_from_slice(transmute_to_u8(&header));
         let path = path.to_path_buf();
-        SlottedPageMmap { path, header, mmap }
+        let mut slotted_mmap = SlottedPageMmap { path, header, mmap };
+        slotted_mmap.persist_page_header();
+        slotted_mmap
     }
 
-    pub(crate) fn open(path: &Path) -> SlottedPageMmap {
+    pub fn open(path: &Path) -> SlottedPageMmap {
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header = SlottedPageHeader::read_from_mmap(&mmap);
         let path = path.to_path_buf();
@@ -157,7 +161,7 @@ impl SlottedPageMmap {
             != 0
     }
 
-    pub(crate) fn free_space(&self) -> usize {
+    pub fn free_space(&self) -> usize {
         let slot_count = self.header.slot_count as usize;
         if slot_count == 0 {
             // contains only the header
@@ -191,6 +195,8 @@ impl SlottedPageMmap {
             return None;
         }
 
+        // TODO check if the value is smaller than the minimum value size
+
         // size of the value in bytes
         let value_size = value
             .map(|v| v.len())
@@ -220,7 +226,7 @@ impl SlottedPageMmap {
         // update header
         self.header.data_start_offset = new_data_start_offset as u64;
         self.header.slot_count += 1;
-        self.mmap[0..16].copy_from_slice(transmute_to_u8(&self.header));
+        self.persist_page_header();
         Some(next_slot_id)
     }
 
@@ -272,6 +278,9 @@ impl SlottedPageMmap {
 
         // update slot
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
+
+        // TODO make sure that we keep at least the minimum value size
+        // prepend with zeros if the new value is smaller than minimum value size
         let update_slot = Slot {
             offset: value_start as u64, // new offset value
             length: value_size as u64,  // new value size
@@ -284,7 +293,7 @@ impl SlottedPageMmap {
         if slot.offset as usize == page_data_start {
             // update page header
             self.header.data_start_offset = value_start as u64;
-            self.mmap[0..16].copy_from_slice(transmute_to_u8(&self.header));
+            self.persist_page_header();
             return Some(());
         }
 
@@ -293,7 +302,7 @@ impl SlottedPageMmap {
 
     pub fn compact(&mut self) {
         // TODO
-        // - shift all values to the beginning of the page?
+        // - shift all values to the end of the page
         // - update slot offsets
         // - update header
         // - the page tracker needs to be updated!

@@ -7,7 +7,7 @@ type PointOffset = u32;
 type PagePointer = (u32, u32); // (PageId, SlotId)
 
 struct PayloadStorage {
-    page_tracker: HashMap<PointOffset, PagePointer>, // maps point offset to page and slot
+    page_tracker: HashMap<PointOffset, PagePointer>, // TODO make Vec<(PageId, SlotId)> as point_offset are contiguous
     pages: HashMap<u32, SlottedPageMmap>, // TODO Arc<Mutex<SlottedPageMmap>> for concurrent reads
     base_path: PathBuf,
 }
@@ -128,7 +128,7 @@ mod tests {
     fn test_empty_payload_storage() {
         let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
 
-        let mut storage = PayloadStorage::new(dir.path().to_path_buf());
+        let storage = PayloadStorage::new(dir.path().to_path_buf());
         let payload = storage.get_payload(0);
         assert!(payload.is_none());
     }
