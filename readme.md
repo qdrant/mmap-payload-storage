@@ -14,4 +14,5 @@ https://www.notion.so/qdrant/Mmap-payload-storage-d4734f1f64e141fb9a249486e7cde3
 - [ ] test update with larger data not fitting
 - [ ] test update with smaller data fitting
 - [ ] persist page tracker
+- [ ] load payload_storage from disk
 - [ ] optimize to decrease fragmentation

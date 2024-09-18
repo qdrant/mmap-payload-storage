@@ -48,11 +48,6 @@ pub struct SlottedPageMmap {
     mmap: MmapMut,
 }
 
-// TODOs
-// - [ ] update value
-// - [ ] delete value
-// - [ ] compact page
-
 impl SlottedPageMmap {
     // Slotted page is a page with a fixed size that contains slots and values.
     pub const SLOTTED_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
@@ -246,6 +241,62 @@ impl SlottedPageMmap {
         };
         self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&slot));
         Some(())
+    }
+
+    /// Update the value associated with the slot.
+    /// The new value must have a size equal or less than the current value.
+    ///
+    /// Returns
+    /// - None if the slot_id is out of bounds or the new value is larger than the current value (caller needs a new page)
+    /// - Some(()) if the value was successfully updated
+    pub fn update_value(&mut self, slot_id: usize, value: &[u8]) -> Option<()> {
+        let slot_count = self.header.slot_count;
+        if slot_id >= slot_count as usize {
+            return None;
+        }
+
+        let slot = self.read_slot(&(slot_id as u32))?;
+
+        let value_size = value.len();
+        let value_bytes = value;
+
+        // check if there is enough space for the new value
+        if value_size > slot.length as usize {
+            return None;
+        }
+
+        // update value region
+        let value_end = slot.offset as usize + slot.length as usize;
+        let value_start = value_end - value_size;
+        self.mmap[value_start..value_end].copy_from_slice(value_bytes);
+
+        // update slot
+        let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
+        let update_slot = Slot {
+            offset: value_start as u64, // new offset value
+            length: value_size as u64,  // new value size
+            deleted: true,              // mark as non deleted
+        };
+        self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&update_slot));
+
+        // check if it was the last value in the page (where the data_start_offset points to)
+        let page_data_start = self.header.data_start_offset as usize;
+        if slot.offset as usize == page_data_start {
+            // update page header
+            self.header.data_start_offset = value_start as u64;
+            self.mmap[0..16].copy_from_slice(transmute_to_u8(&self.header));
+            return Some(());
+        }
+
+        Some(())
+    }
+
+    pub fn compact(&mut self) {
+        // TODO
+        // - shift all values to the beginning of the page?
+        // - update slot offsets
+        // - update header
+        // - the page tracker needs to be updated!
     }
 }
 
@@ -475,5 +526,40 @@ mod tests {
 
         assert_eq!(mmap.all_values().len(), 100);
         assert_eq!(mmap.values().len(), 99)
+    }
+
+    #[test]
+    fn test_update() {
+        let file = Builder::new()
+            .prefix("test-pages")
+            .suffix(".data")
+            .tempfile()
+            .unwrap();
+        let path = file.path();
+
+        let mut mmap = SlottedPageMmap::new(path, SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES);
+        let values = mmap.all_values();
+        assert_eq!(values.len(), 0);
+
+        // push one value
+        let foo = Foo { bar: 1, qux: true };
+        mmap.push(Some(foo.binary().as_slice())).unwrap();
+
+        // read slots & values
+        let slot = mmap.read_slot(&0).unwrap();
+        assert_eq!(slot.offset, 33_554_421);
+        assert_eq!(slot.length, 11);
+        let expected = Foo { bar: 1, qux: true };
+        let actual = Foo::from_binary(mmap.read_raw_value(&slot).unwrap());
+        assert_eq!(actual, expected);
+
+        // update value
+        let new_foo = Foo { bar: 2, qux: false };
+        mmap.update_value(0, new_foo.binary().as_slice()).unwrap();
+
+        // read slots & values
+        let slot = mmap.read_slot(&0).unwrap();
+        let actual = Foo::from_binary(mmap.read_raw_value(&slot).unwrap());
+        assert_eq!(actual, new_foo);
     }
 }

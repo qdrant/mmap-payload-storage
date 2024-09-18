@@ -86,10 +86,15 @@ impl PayloadStorage {
 
         let mapping_exists = self.page_tracker.contains_key(&point_offset);
         if mapping_exists {
-            // TODO handle update (in place vs new page)
             let (page_id, slot_id) = self.page_tracker.get(&point_offset).unwrap();
             let page = self.pages.get_mut(page_id).unwrap();
-            todo!("update the payload in the page");
+            let updated = page.update_value(*slot_id as usize, &payload_bin);
+            if updated.is_none() {
+                // TODO handle update in a new page
+                // delete value from old page
+                // find a new page (or create a new one if all full)
+                // insert value in new page
+            }
         } else {
             // this is a new payload
             let page_id = self
