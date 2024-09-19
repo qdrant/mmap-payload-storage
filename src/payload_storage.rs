@@ -28,6 +28,7 @@ impl PayloadStorage {
             .join(format!("slotted-paged-{}.dat", page_id))
     }
 
+    /// Add a page to the storage
     fn add_page(&mut self, page_id: u32, page: SlottedPageMmap) {
         let page_exists = self.pages.contains_key(&page_id);
         if page_exists {
@@ -36,6 +37,7 @@ impl PayloadStorage {
         self.pages.insert(page_id, Arc::new(RwLock::new(page)));
     }
 
+    /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
         let mapping = self.page_tracker.get(point_offset as usize)?;
         let (page_id, slot_id) = (*mapping)?;
@@ -45,7 +47,8 @@ impl PayloadStorage {
         raw.map(Payload::from_binary)
     }
 
-    // TODO needs dedicated tests
+    /// Find the best fitting page for a payload
+    /// Returns Some(page_id) of the best fitting page or None if no page has enough space
     fn find_best_fitting_page(&self, payload_size: usize) -> Option<u32> {
         if self.pages.is_empty() {
             return None;
@@ -70,6 +73,7 @@ impl PayloadStorage {
         }
     }
 
+    /// Create a new page and return its id
     fn create_new_page(&mut self) -> u32 {
         let max_id = self.pages.keys().max().unwrap_or(&0);
         let new_page_id = max_id + 1;
@@ -81,6 +85,7 @@ impl PayloadStorage {
         new_page_id
     }
 
+    /// Get the mapping for a given point offset
     fn get_mapping(&self, point_offset: PointOffset) -> Option<PagePointer> {
         self.page_tracker
             .get(point_offset as usize)
@@ -88,6 +93,7 @@ impl PayloadStorage {
             .flatten()
     }
 
+    /// Put a payload in the storage
     pub fn put_payload(&mut self, point_offset: PointOffset, payload: Payload) {
         if self.pages.is_empty() {
             self.create_new_page();
@@ -115,7 +121,7 @@ impl PayloadStorage {
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
-            let slot_id = page.write().push_value(Some(&payload_bin)).unwrap();
+            let slot_id = page.write().insert_value(Some(&payload_bin)).unwrap();
             // ensure page_tracker is long enough
             if self.page_tracker.len() <= point_offset as usize {
                 self.page_tracker.resize(point_offset as usize + 1, None);
@@ -125,6 +131,8 @@ impl PayloadStorage {
         }
     }
 
+    /// Delete a payload from the storage
+    /// Returns None if the point_offset, page, or payload was not found
     pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<()> {
         let (page_id, slot_id) = self.get_mapping(point_offset)?;
         let page = self.pages.get_mut(&page_id)?;

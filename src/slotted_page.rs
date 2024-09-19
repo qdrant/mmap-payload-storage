@@ -53,24 +53,24 @@ pub struct SlottedPageMmap {
 }
 
 impl SlottedPageMmap {
-    // Slotted page is a page with a fixed size that contains slots and values.
+    /// Slotted page is a page with a fixed size that contains slots and values.
     pub const SLOTTED_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
 
-    // Expect JSON values to have roughly 3–5 fields with mostly small values.
-    // Therefore, reserve 100 bytes for each value in order to avoid frequent reallocations.
-    // For 1M values, this would require 128MB of memory.
+    /// Expect JSON values to have roughly 3–5 fields with mostly small values.
+    /// Therefore, reserve 100 bytes for each value in order to avoid frequent reallocations.
+    /// For 1M values, this would require 128MB of memory.
     const MIN_VALUE_SIZE_BYTES: usize = 128;
 
-    // Placeholder value for empty slots
+    /// Placeholder value for empty slots
     const PLACEHOLDER_VALUE: [u8; SlottedPageMmap::MIN_VALUE_SIZE_BYTES] =
         [0; SlottedPageMmap::MIN_VALUE_SIZE_BYTES];
 
-    //Flushes outstanding memory map modifications to disk.
+    /// Flushes outstanding memory map modifications to disk.
     fn flush(&self) {
         self.mmap.flush().unwrap();
     }
 
-    // Return all values in the page with deleted values as None
+    /// Return all values in the page with deleted values as None
     fn all_values(&self) -> Vec<Option<&[u8]>> {
         let mut values = Vec::new();
         for i in 0..self.header.slot_count {
@@ -90,6 +90,7 @@ impl SlottedPageMmap {
         values
     }
 
+    /// Returns all non deleted values in the page
     fn values(&self) -> Vec<&[u8]> {
         let mut values = Vec::new();
         for i in 0..self.header.slot_count {
@@ -107,15 +108,18 @@ impl SlottedPageMmap {
         values
     }
 
+    /// Write the current page header to the memory map
     fn write_page_header(&mut self) {
         self.mmap[0..16].copy_from_slice(transmute_to_u8(&self.header));
     }
 
+    /// Write the slot to the memory map
     fn write_slot(&mut self, slot_id: usize, update_slot: Slot) {
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
         self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&update_slot));
     }
 
+    /// Create a new page at the given path
     pub fn new(path: &Path, page_size: usize) -> SlottedPageMmap {
         create_and_ensure_length(path, page_size).unwrap();
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
@@ -129,6 +133,7 @@ impl SlottedPageMmap {
         slotted_mmap
     }
 
+    /// Open an existing page at the given path
     pub fn open(path: &Path) -> SlottedPageMmap {
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header: &SlottedPageHeader = transmute_from_u8(&mmap[0..16]);
@@ -137,15 +142,16 @@ impl SlottedPageMmap {
         SlottedPageMmap { path, header, mmap }
     }
 
-    // Read raw value associated with the slot id.
-    // Filters out:
-    // - deleted slots
-    // - placeholder values
+    /// Get value associated with the slot id.
+    /// Filters out:
+    /// - deleted values
+    /// - placeholder values
     pub fn get_value(&self, slot_id: &u32) -> Option<&[u8]> {
         let slot = self.get_slot(slot_id)?;
         self.get_slot_value(&slot)
     }
 
+    /// Get the slot associated with the slot id.
     fn get_slot(&self, slot_id: &u32) -> Option<Slot> {
         let slot_count = self.header.slot_count;
         if *slot_id >= slot_count as u32 {
@@ -160,7 +166,7 @@ impl SlottedPageMmap {
         Some(slot.clone())
     }
 
-    // Read value associated with the slot
+    /// Get value associated with the slot
     fn get_slot_value(&self, slot: &Slot) -> Option<&[u8]> {
         let start = slot.offset;
         // adjust the end to account for the left padding
@@ -173,19 +179,21 @@ impl SlottedPageMmap {
         }
     }
 
-    // check if there is enough space for a new slot + min value
+    /// Check if there is enough space for a new slot + min value
     fn has_capacity_for_min_value(&self) -> bool {
         self.free_space()
             .saturating_sub(Slot::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES)
             != 0
     }
 
+    /// Check if there is enough space for a new slot + value
     fn has_capacity_for_value(&self, extra_len: usize) -> bool {
         self.free_space()
             .saturating_sub(Slot::size_in_bytes() + extra_len)
             != 0
     }
 
+    /// Return the amount of free space in the page
     pub fn free_space(&self) -> usize {
         let slot_count = self.header.slot_count as usize;
         if slot_count == 0 {
@@ -198,6 +206,7 @@ impl SlottedPageMmap {
         data_start_offset.saturating_sub(last_slot_offset)
     }
 
+    /// Compute the start and end offsets for the slot
     fn offsets_for_slot(&self, slot_id: usize) -> (usize, usize) {
         let slot_offset = SlottedPageHeader::size_in_bytes() + slot_id * Slot::size_in_bytes();
         let start = slot_offset;
@@ -205,16 +214,17 @@ impl SlottedPageMmap {
         (start, end)
     }
 
-    pub fn push_placeholder(&mut self) -> Option<usize> {
-        self.push_value(None)
+    /// Insert a new placeholder into the page
+    pub fn insert_placeholder_value(&mut self) -> Option<usize> {
+        self.insert_value(None)
     }
 
-    // Push a new value to the page
-    //
-    // Returns
-    // - None if there is not enough space for a new slot + value
-    // - Some(slot_id) if the value was successfully added
-    pub fn push_value(&mut self, value: Option<&[u8]>) -> Option<usize> {
+    /// Insert a new value into the page
+    ///
+    /// Returns
+    /// - None if there is not enough space for a new slot + value
+    /// - Some(slot_id) if the value was successfully added
+    pub fn insert_value(&mut self, value: Option<&[u8]>) -> Option<usize> {
         // check if there is enough space the value
         match value {
             Some(v) => {
@@ -273,7 +283,7 @@ impl SlottedPageMmap {
         Some(next_slot_id)
     }
 
-    /// Mark a slot as deleted logically.
+    /// Mark a slot as deleted.
     pub fn delete_value(&mut self, slot_id: usize) -> Option<()> {
         let slot_count = self.header.slot_count;
         if slot_id >= slot_count as usize {
@@ -430,7 +440,7 @@ mod tests {
         let mut free_space = mmap.free_space();
         // add placeholder values
         while mmap.has_capacity_for_min_value() {
-            mmap.push_placeholder().unwrap();
+            mmap.insert_placeholder_value().unwrap();
             let new_free_space = mmap.free_space();
             assert!(new_free_space < free_space);
             free_space = new_free_space;
@@ -441,7 +451,7 @@ mod tests {
         assert_eq!(mmap.free_space(), 112); // not enough space for a new slot + placeholder value
 
         // can't add more values
-        assert_eq!(mmap.push_placeholder(), None);
+        assert_eq!(mmap.insert_placeholder_value(), None);
 
         // drop and reopen
         drop(mmap);
@@ -468,7 +478,7 @@ mod tests {
 
         // add 10 placeholder values
         for _ in 0..10 {
-            mmap.push_placeholder().unwrap();
+            mmap.insert_placeholder_value().unwrap();
         }
 
         assert_eq!(mmap.header.slot_count, 10);
@@ -513,7 +523,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.push_value(Some(foo.binary().as_slice())).unwrap();
+            mmap.insert_value(Some(foo.binary().as_slice())).unwrap();
         }
 
         assert_eq!(mmap.header.slot_count, 100);
@@ -562,7 +572,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.push_value(Some(foo.binary().as_slice())).unwrap();
+            mmap.insert_value(Some(foo.binary().as_slice())).unwrap();
         }
 
         // delete slot 10
@@ -589,7 +599,7 @@ mod tests {
 
         // push one value
         let foo = Foo { bar: 1, qux: true };
-        mmap.push_value(Some(foo.binary().as_slice())).unwrap();
+        mmap.insert_value(Some(foo.binary().as_slice())).unwrap();
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
