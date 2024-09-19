@@ -28,7 +28,7 @@ struct Slot {
 
 impl Slot {
     const fn size_in_bytes() -> usize {
-        24 // 8 + 8 + 1 + + 1 + 6 padding
+        24 // 8 + 8 + 1 + 1 + 6 padding
     }
 
     fn new(offset: u64, length: u64, left_padding: u8, deleted: bool) -> Slot {
@@ -216,7 +216,7 @@ impl SlottedPageMmap {
 
     /// Insert a new placeholder into the page
     pub fn insert_placeholder_value(&mut self) -> Option<usize> {
-        self.insert_value(None)
+        self.insert_value(&SlottedPageMmap::PLACEHOLDER_VALUE)
     }
 
     /// Insert a new value into the page
@@ -224,28 +224,14 @@ impl SlottedPageMmap {
     /// Returns
     /// - None if there is not enough space for a new slot + value
     /// - Some(slot_id) if the value was successfully added
-    pub fn insert_value(&mut self, value: Option<&[u8]>) -> Option<usize> {
+    pub fn insert_value(&mut self, value: &[u8]) -> Option<usize> {
         // check if there is enough space the value
-        match value {
-            Some(v) => {
-                if !self.has_capacity_for_value(v.len()) {
-                    return None;
-                }
-            }
-            None => {
-                if !self.has_capacity_for_min_value() {
-                    return None;
-                }
-            }
+        if !self.has_capacity_for_value(value.len()) {
+            return None;
         }
 
         // size of the value in bytes
-        let real_value_size = value
-            .map(|v| v.len())
-            .unwrap_or(SlottedPageMmap::MIN_VALUE_SIZE_BYTES);
-
-        // value bytes
-        let real_value_bytes = value.unwrap_or(&SlottedPageMmap::PLACEHOLDER_VALUE);
+        let real_value_size = value.len();
 
         // padding to align the value to the end of the page
         let padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
@@ -269,7 +255,7 @@ impl SlottedPageMmap {
 
         // set value region
         let value_end = new_data_start_offset + real_value_size;
-        self.mmap[new_data_start_offset..value_end].copy_from_slice(real_value_bytes);
+        self.mmap[new_data_start_offset..value_end].copy_from_slice(value);
 
         // set left padding for values that are smaller than the minimum value size
         if padding > 0 {
@@ -523,7 +509,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.insert_value(Some(foo.binary().as_slice())).unwrap();
+            mmap.insert_value(foo.binary().as_slice()).unwrap();
         }
 
         assert_eq!(mmap.header.slot_count, 100);
@@ -572,7 +558,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.insert_value(Some(foo.binary().as_slice())).unwrap();
+            mmap.insert_value(foo.binary().as_slice()).unwrap();
         }
 
         // delete slot 10
@@ -599,7 +585,7 @@ mod tests {
 
         // push one value
         let foo = Foo { bar: 1, qux: true };
-        mmap.insert_value(Some(foo.binary().as_slice())).unwrap();
+        mmap.insert_value(foo.binary().as_slice()).unwrap();
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();

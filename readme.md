@@ -9,6 +9,7 @@ New experimental storage for vector payloads using mmap.
 - Those pages are following the Slotted Page structure
 - Slots are fixed size.
 - Values have a dynamic size and a min size (128 bytes)
+- Values are compressed with lz4
 - Deletes mark the slot with a tombstone
 - Updates:
   - can be done in place if the new value fits

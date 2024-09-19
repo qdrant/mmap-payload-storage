@@ -1,5 +1,6 @@
 use crate::payload::Payload;
 use crate::slotted_page::SlottedPageMmap;
+use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,6 +16,16 @@ struct PayloadStorage {
 }
 
 impl PayloadStorage {
+    /// LZ4 compression
+    fn compress(value: &[u8]) -> Vec<u8> {
+        compress_prepend_size(value)
+    }
+
+    /// LZ4 decompression
+    fn decompress(value: &[u8]) -> Vec<u8> {
+        lz4_flex::decompress_size_prepended(value).unwrap()
+    }
+
     pub fn new(path: PathBuf) -> Self {
         Self {
             page_tracker: Vec::new(),
@@ -44,7 +55,10 @@ impl PayloadStorage {
         let page = self.pages.get(&page_id).expect("page not found");
         let page_guard = page.read();
         let raw = page_guard.get_value(&slot_id);
-        raw.map(Payload::from_binary)
+        raw.map(|pb| {
+            let decompressed = Self::decompress(pb);
+            Payload::from_binary(&decompressed)
+        })
     }
 
     /// Find the best fitting page for a payload
@@ -99,7 +113,7 @@ impl PayloadStorage {
             self.create_new_page();
         }
 
-        let payload_bin = payload.binary();
+        let payload_bin = Self::compress(&payload.binary());
         let payload_size = size_of_val(&payload_bin);
 
         if let Some((page_id, slot_id)) = self.get_mapping(point_offset) {
@@ -121,7 +135,7 @@ impl PayloadStorage {
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
-            let slot_id = page.write().insert_value(Some(&payload_bin)).unwrap();
+            let slot_id = page.write().insert_value(&payload_bin).unwrap();
             // ensure page_tracker is long enough
             if self.page_tracker.len() <= point_offset as usize {
                 self.page_tracker.resize(point_offset as usize + 1, None);
