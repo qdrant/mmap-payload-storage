@@ -20,7 +20,7 @@ impl SlottedPageHeader {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct SlotHeader {
+pub struct SlotHeader {
     offset: u64,      // offset in the page (8 bytes)
     length: u64,      // length of the value (8 bytes)
     left_padding: u8, // padding within the value for small values (1 byte)
@@ -29,8 +29,9 @@ struct SlotHeader {
 }
 
 impl SlotHeader {
-    const fn size_in_bytes() -> usize {
-        24 // 8 + 8 + 1 + 1 + 6 padding
+    pub const fn size_in_bytes() -> usize {
+        size_of::<Self>()
+        // 24 // 8 + 8 + 1 + 1 + 6 padding
     }
 
     fn new(offset: u64, length: u64, left_padding: u8, deleted: bool) -> SlotHeader {
@@ -49,7 +50,7 @@ impl SlotHeader {
 }
 
 #[derive(Debug)]
-pub struct SlottedPageMmap {
+pub(crate) struct SlottedPageMmap {
     path: PathBuf,
     header: SlottedPageHeader,
     mmap: MmapMut,
@@ -62,7 +63,7 @@ impl SlottedPageMmap {
     /// Expect JSON values to have roughly 3–5 fields with mostly small values.
     /// Therefore, reserve 128 bytes for each value in order to avoid frequent reallocations.
     /// For 1M values, this would require 128MB of memory.
-    const MIN_VALUE_SIZE_BYTES: usize = 128;
+    pub const MIN_VALUE_SIZE_BYTES: usize = 128;
 
     /// Placeholder value for empty slots
     const PLACEHOLDER_VALUE: [u8; SlottedPageMmap::MIN_VALUE_SIZE_BYTES] =
@@ -173,7 +174,11 @@ impl SlottedPageMmap {
     fn get_slot_value(&self, slot: &SlotHeader) -> Option<&[u8]> {
         let start = slot.offset;
         // adjust the end to account for the left padding
-        let end = start + slot.length - slot.left_padding as u64;
+        let end = start
+            .checked_add(slot.length)
+            .expect("start + length should not overflow")
+            - slot.left_padding as u64;
+        
         let value = &self.mmap[start as usize..end as usize];
         if value == SlottedPageMmap::PLACEHOLDER_VALUE {
             None
@@ -229,11 +234,6 @@ impl SlottedPageMmap {
     /// - None if there is not enough space for a new slot + value
     /// - Some(slot_id) if the value was successfully added
     pub fn insert_value(&mut self, value: &[u8]) -> Option<SlotId> {
-        // check if there is enough space the value
-        if !self.has_capacity_for_value(value.len()) {
-            return None;
-        }
-
         // size of the value in bytes
         let real_value_size = value.len();
 
@@ -242,6 +242,11 @@ impl SlottedPageMmap {
 
         // actual value size accounting for the minimum value size
         let value_len = real_value_size + padding;
+
+        // check if there is enough space for the value
+        if !self.has_capacity_for_value(value_len) {
+            return None;
+        }
 
         // data grows from the end of the page
         let new_data_start_offset = self.header.data_start_offset as usize - value_len;

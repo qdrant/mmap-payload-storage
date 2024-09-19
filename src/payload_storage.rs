@@ -1,5 +1,5 @@
 use crate::payload::Payload;
-use crate::slotted_page::{SlotId, SlottedPageMmap};
+use crate::slotted_page::{SlotHeader, SlotId, SlottedPageMmap};
 use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -15,9 +15,10 @@ struct PagePointer {
     slot_id: SlotId,
 }
 
-struct PayloadStorage {
+pub struct PayloadStorage {
     page_tracker: Vec<Option<PagePointer>>, // points_offsets are contiguous
     pages: HashMap<u32, Arc<RwLock<SlottedPageMmap>>>, // page_id -> mmap page
+    max_page_id: u32,
     base_path: PathBuf,
 }
 
@@ -36,11 +37,13 @@ impl PayloadStorage {
         Self {
             page_tracker: Vec::new(),
             pages: HashMap::new(),
+            max_page_id: 0,
             base_path: path,
         }
     }
 
-    pub fn path_page(&self, page_id: u32) -> PathBuf {
+    /// Get the path for a given page id
+    pub fn page_path(&self, page_id: u32) -> PathBuf {
         self.base_path
             .join(format!("slotted-paged-{}.dat", page_id))
     }
@@ -51,7 +54,13 @@ impl PayloadStorage {
         if page_exists {
             return false;
         }
-        self.pages.insert(page_id, Arc::new(RwLock::new(page)));
+        let previous = self.pages.insert(page_id, Arc::new(RwLock::new(page)));
+
+        assert!(previous.is_none());
+
+        if page_id > self.max_page_id {
+            self.max_page_id = page_id;
+        }
 
         true
     }
@@ -62,11 +71,10 @@ impl PayloadStorage {
             self.page_tracker.get(point_offset as usize)?.as_ref()?;
         let page = self.pages.get(page_id).expect("page not found");
         let page_guard = page.read();
-        let raw = page_guard.get_value(slot_id);
-        raw.map(|pb| {
-            let decompressed = Self::decompress(pb);
-            Payload::from_bytes(&decompressed)
-        })
+        let raw = page_guard.get_value(slot_id)?;
+        let decompressed = Self::decompress(raw);
+        let payload = Payload::from_bytes(&decompressed);
+        Some(payload)
     }
 
     /// Find the best fitting page for a payload
@@ -75,20 +83,22 @@ impl PayloadStorage {
         if self.pages.is_empty() {
             return None;
         }
+        let needed_size =
+            SlottedPageMmap::MIN_VALUE_SIZE_BYTES.max(payload_size) + SlotHeader::size_in_bytes();
         let mut best_page = 0;
         // best is the page with the lowest free space that fits the payload
         let mut best_fit_size = usize::MAX;
 
         for (page_id, page) in &self.pages {
             let free_space = page.read().free_space();
-            if free_space >= payload_size && free_space < best_fit_size {
+            if free_space >= needed_size && free_space < best_fit_size {
                 best_page = *page_id;
                 best_fit_size = free_space;
             }
         }
 
-        // no capacity
-        if best_fit_size == 0 {
+        // no page has enough capacity
+        if best_page == 0 {
             None
         } else {
             Some(best_page)
@@ -97,13 +107,15 @@ impl PayloadStorage {
 
     /// Create a new page and return its id
     fn create_new_page(&mut self) -> u32 {
-        let max_id = self.pages.keys().max().unwrap_or(&0);
-        let new_page_id = max_id + 1;
-        let path = self.path_page(new_page_id);
-        self.add_page(
+        let new_page_id = self.max_page_id + 1;
+        let path = self.page_path(new_page_id);
+        let was_created = self.add_page(
             new_page_id,
             SlottedPageMmap::new(&path, SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES),
         );
+
+        assert!(was_created);
+
         new_page_id
     }
 
@@ -118,8 +130,9 @@ impl PayloadStorage {
             self.create_new_page();
         }
 
-        let comp_payload = Self::compress(&payload.to_bytes());
-        let payload_size = size_of_val(&comp_payload);
+        let payload_bytes = payload.to_bytes();
+        let comp_payload = Self::compress(&payload_bytes);
+        let payload_size = comp_payload.len();
 
         if let Some(PagePointer { page_id, slot_id }) = self.get_mapping(point_offset).copied() {
             let page = self.pages.get_mut(&page_id).unwrap();
@@ -147,10 +160,7 @@ impl PayloadStorage {
                 self.page_tracker.resize(point_offset as usize + 1, None);
             }
             // update page_tracker
-            self.page_tracker[point_offset as usize] = Some(PagePointer {
-                page_id,
-                slot_id: slot_id as u32,
-            });
+            self.page_tracker[point_offset as usize] = Some(PagePointer { page_id, slot_id });
         }
     }
 
@@ -171,23 +181,69 @@ impl PayloadStorage {
 mod tests {
     use super::*;
     use serde_json::Value;
-    use tempfile::Builder;
+    use tempfile::{Builder, TempDir};
+
+    use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
+
+    fn empty_storage() -> (TempDir, PayloadStorage) {
+        let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
+        let storage = PayloadStorage::new(dir.path().to_path_buf());
+
+        assert!(storage.pages.is_empty());
+        assert!(storage.page_tracker.is_empty());
+
+        (dir, storage)
+    }
+
+    fn random_word(rng: &mut impl Rng) -> String {
+        let len = rng.gen_range(1..10);
+        let mut word = String::with_capacity(len);
+        for _ in 0..len {
+            word.push(rng.gen_range(b'a'..b'z') as char);
+        }
+        word
+    }
+
+    fn one_random_payload_please(rng: &mut impl Rng, size_factor: usize) -> Payload {
+        let mut payload = Payload::default();
+
+        let word = random_word(rng);
+
+        let sentence = (0..rng.gen_range(1..20 * size_factor))
+            .map(|_| random_word(rng))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let distr = Uniform::new(0, 100000);
+        let indices = (0..rng.gen_range(1..100 * size_factor))
+            .map(|_| distr.sample(rng))
+            .collect::<Vec<_>>();
+
+        payload.0 = serde_json::json!(
+            {
+                "word": word, // string
+                "sentence": sentence, // string
+                "number": rng.gen_range(0..1000), // number
+                "indices": indices // array of numbers
+            }
+        )
+        .as_object()
+        .unwrap()
+        .clone();
+
+        payload
+    }
 
     #[test]
     fn test_empty_payload_storage() {
-        let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-
-        let storage = PayloadStorage::new(dir.path().to_path_buf());
+        let (_dir, storage) = empty_storage();
         let payload = storage.get_payload(0);
         assert!(payload.is_none());
     }
 
     #[test]
-    fn test_put_empty_payload() {
-        let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-        let mut storage = PayloadStorage::new(dir.path().to_path_buf());
-        assert!(storage.pages.is_empty());
-        assert!(storage.page_tracker.is_empty());
+    fn test_put_single_empty_payload() {
+        let (_dir, mut storage) = empty_storage();
 
         let payload = Payload::default();
         storage.put_payload(0, payload);
@@ -200,11 +256,8 @@ mod tests {
     }
 
     #[test]
-    fn test_put_payload() {
-        let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-        let mut storage = PayloadStorage::new(dir.path().to_path_buf());
-        assert!(storage.pages.is_empty());
-        assert!(storage.page_tracker.is_empty());
+    fn test_put_single_payload() {
+        let (_dir, mut storage) = empty_storage();
 
         let mut payload = Payload::default();
         payload
@@ -225,11 +278,35 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_payload() {
-        let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-        let mut storage = PayloadStorage::new(dir.path().to_path_buf());
-        assert!(storage.pages.is_empty());
-        assert!(storage.page_tracker.is_empty());
+    fn test_put_payload() {
+        let (_dir, mut storage) = empty_storage();
+
+        let rng = &mut rand::thread_rng();
+
+        let mut payloads = (0..100000u32)
+            .map(|point_offset| (point_offset, one_random_payload_please(rng, 2)))
+            .collect::<Vec<_>>();
+
+        for (point_offset, payload) in payloads.iter() {
+            storage.put_payload(*point_offset, payload.clone());
+
+            let stored_payload = storage.get_payload(*point_offset);
+            assert!(stored_payload.is_some());
+            assert_eq!(stored_payload.unwrap(), payload.clone());
+        }
+
+        // read randomly
+        payloads.shuffle(rng);
+        for (point_offset, payload) in payloads.iter() {
+            let stored_payload = storage.get_payload(*point_offset);
+            assert!(stored_payload.is_some());
+            assert_eq!(stored_payload.unwrap(), payload.clone());
+        }
+    }
+
+    #[test]
+    fn test_delete_single_payload() {
+        let (_dir, mut storage) = empty_storage();
 
         let mut payload = Payload::default();
         payload
@@ -257,11 +334,8 @@ mod tests {
     }
 
     #[test]
-    fn test_update_payload() {
-        let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-        let mut storage = PayloadStorage::new(dir.path().to_path_buf());
-        assert!(storage.pages.is_empty());
-        assert!(storage.page_tracker.is_empty());
+    fn test_update_single_payload() {
+        let (_dir, mut storage) = empty_storage();
 
         let mut payload = Payload::default();
         payload
