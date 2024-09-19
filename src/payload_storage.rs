@@ -1,14 +1,16 @@
 use crate::payload::Payload;
 use crate::slotted_page::SlottedPageMmap;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 type PointOffset = u32;
 type PagePointer = (u32, u32); // (PageId, SlotId)
 
 struct PayloadStorage {
     page_tracker: Vec<Option<PagePointer>>, // points_offsets are contiguous
-    pages: HashMap<u32, SlottedPageMmap>,   // TODO Arc<Mutex<SlottedPageMmap>> for concurrent reads
+    pages: HashMap<u32, Arc<RwLock<SlottedPageMmap>>>, // page_id -> mmap page
     base_path: PathBuf,
 }
 
@@ -31,14 +33,15 @@ impl PayloadStorage {
         if page_exists {
             panic!("page already exists");
         }
-        self.pages.insert(page_id, page);
+        self.pages.insert(page_id, Arc::new(RwLock::new(page)));
     }
 
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
         let mapping = self.page_tracker.get(point_offset as usize)?;
         let (page_id, slot_id) = (*mapping)?;
         let page = self.pages.get(&page_id).expect("page not found");
-        let raw = page.read_value(&slot_id);
+        let page_guard = page.read();
+        let raw = page_guard.get_value(&slot_id);
         raw.map(Payload::from_binary)
     }
 
@@ -52,7 +55,7 @@ impl PayloadStorage {
         let mut best_fit_size = usize::MAX;
 
         for (page_id, page) in &self.pages {
-            let free_space = page.free_space();
+            let free_space = page.read().free_space();
             if free_space >= payload_size && free_space < best_fit_size {
                 best_page = *page_id;
                 best_fit_size = free_space;
@@ -95,7 +98,7 @@ impl PayloadStorage {
 
         if let Some((page_id, slot_id)) = self.get_mapping(point_offset) {
             let page = self.pages.get_mut(&page_id).unwrap();
-            let updated = page.update_value(slot_id as usize, &payload_bin);
+            let updated = page.write().update_value(slot_id as usize, &payload_bin);
             if updated.is_none() {
                 // TODO handle update in a new page
                 // delete value from old page
@@ -112,7 +115,7 @@ impl PayloadStorage {
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
-            let slot_id = page.push_value(Some(&payload_bin)).unwrap();
+            let slot_id = page.write().push_value(Some(&payload_bin)).unwrap();
             // ensure page_tracker is long enough
             if self.page_tracker.len() <= point_offset as usize {
                 self.page_tracker.resize(point_offset as usize + 1, None);
@@ -126,7 +129,7 @@ impl PayloadStorage {
         let (page_id, slot_id) = self.get_mapping(point_offset)?;
         let page = self.pages.get_mut(&page_id)?;
         // delete value from page
-        page.delete_value(slot_id as usize);
+        page.write().delete_value(slot_id as usize);
         // delete mapping
         self.page_tracker[point_offset as usize] = None;
         Some(())

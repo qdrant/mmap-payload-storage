@@ -74,13 +74,13 @@ impl SlottedPageMmap {
     fn all_values(&self) -> Vec<Option<&[u8]>> {
         let mut values = Vec::new();
         for i in 0..self.header.slot_count {
-            let slot = self.read_slot(&(i as u32)).unwrap();
+            let slot = self.get_slot(&(i as u32)).unwrap();
             // skip values associated with deleted slots
             if slot.deleted {
                 values.push(None);
                 continue;
             }
-            match self.read_slot_value(&slot) {
+            match self.get_slot_value(&slot) {
                 Some(value) => values.push(Some(value)),
                 None => values.push(None),
             }
@@ -93,12 +93,12 @@ impl SlottedPageMmap {
     fn values(&self) -> Vec<&[u8]> {
         let mut values = Vec::new();
         for i in 0..self.header.slot_count {
-            let slot = self.read_slot(&(i as u32)).unwrap();
+            let slot = self.get_slot(&(i as u32)).unwrap();
             // skip values associated with deleted slots
             if slot.deleted {
                 continue;
             }
-            if let Some(value) = self.read_slot_value(&slot) {
+            if let Some(value) = self.get_slot_value(&slot) {
                 values.push(value)
             }
         }
@@ -141,12 +141,12 @@ impl SlottedPageMmap {
     // Filters out:
     // - deleted slots
     // - placeholder values
-    pub fn read_value(&self, slot_id: &u32) -> Option<&[u8]> {
-        let slot = self.read_slot(slot_id)?;
-        self.read_slot_value(&slot)
+    pub fn get_value(&self, slot_id: &u32) -> Option<&[u8]> {
+        let slot = self.get_slot(slot_id)?;
+        self.get_slot_value(&slot)
     }
 
-    fn read_slot(&self, slot_id: &u32) -> Option<Slot> {
+    fn get_slot(&self, slot_id: &u32) -> Option<Slot> {
         let slot_count = self.header.slot_count;
         if *slot_id >= slot_count as u32 {
             return None;
@@ -161,7 +161,7 @@ impl SlottedPageMmap {
     }
 
     // Read value associated with the slot
-    fn read_slot_value(&self, slot: &Slot) -> Option<&[u8]> {
+    fn get_slot_value(&self, slot: &Slot) -> Option<&[u8]> {
         let start = slot.offset;
         // adjust the end to account for the left padding
         let end = start + slot.length - slot.left_padding as u64;
@@ -282,7 +282,7 @@ impl SlottedPageMmap {
 
         // mark slot as deleted
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
-        let current_slot = self.read_slot(&(slot_id as u32))?;
+        let current_slot = self.get_slot(&(slot_id as u32))?;
         let updated_slot = Slot {
             deleted: true,
             ..current_slot
@@ -303,7 +303,7 @@ impl SlottedPageMmap {
             return None;
         }
 
-        let slot = self.read_slot(&(slot_id as u32))?;
+        let slot = self.get_slot(&(slot_id as u32))?;
 
         let real_value_size = new_value.len();
 
@@ -399,7 +399,7 @@ mod tests {
             SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES - SlottedPageHeader::size_in_bytes()
         );
         assert_eq!(mmap.header.slot_count, 0);
-        assert!(mmap.read_slot(&0).is_none());
+        assert!(mmap.get_slot(&0).is_none());
         drop(mmap);
 
         // reopen
@@ -409,7 +409,7 @@ mod tests {
             SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES - SlottedPageHeader::size_in_bytes()
         );
         assert_eq!(mmap.header.slot_count, 0);
-        assert!(mmap.read_slot(&0).is_none());
+        assert!(mmap.get_slot(&0).is_none());
     }
 
     #[test]
@@ -475,23 +475,23 @@ mod tests {
         assert_eq!(mmap.free_space(), 33_552_896);
 
         // read slots
-        let slot = mmap.read_slot(&0).unwrap();
+        let slot = mmap.get_slot(&0).unwrap();
         assert_eq!(slot.offset, 33_554_304);
         assert_eq!(slot.length, 128);
-        assert_eq!(mmap.read_slot_value(&slot), None);
+        assert_eq!(mmap.get_slot_value(&slot), None);
 
-        let slot = mmap.read_slot(&1).unwrap();
+        let slot = mmap.get_slot(&1).unwrap();
         assert_eq!(slot.offset, 33_554_176);
         assert_eq!(slot.length, 128);
-        assert_eq!(mmap.read_slot_value(&slot), None);
+        assert_eq!(mmap.get_slot_value(&slot), None);
 
-        let slot = mmap.read_slot(&2).unwrap();
+        let slot = mmap.get_slot(&2).unwrap();
         assert_eq!(slot.offset, 33_554_048);
         assert_eq!(slot.length, 128);
-        assert_eq!(mmap.read_slot_value(&slot), None);
+        assert_eq!(mmap.get_slot_value(&slot), None);
 
         // query non-existing slot
-        assert_eq!(mmap.read_slot(&10), None);
+        assert_eq!(mmap.get_slot(&10), None);
     }
 
     #[test]
@@ -520,29 +520,29 @@ mod tests {
         assert_eq!(mmap.free_space(), 33_539_216);
 
         // read slots & values
-        let slot = mmap.read_slot(&0).unwrap();
+        let slot = mmap.get_slot(&0).unwrap();
         assert_eq!(slot.offset, 33_554_304);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 0, qux: true };
-        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
-        let slot = mmap.read_slot(&1).unwrap();
+        let slot = mmap.get_slot(&1).unwrap();
         assert_eq!(slot.offset, 33_554_176);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 1, qux: false };
-        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
-        let slot = mmap.read_slot(&2).unwrap();
+        let slot = mmap.get_slot(&2).unwrap();
         assert_eq!(slot.offset, 33_554_048);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 2, qux: true };
-        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         // query non-existing slot
-        assert_eq!(mmap.read_slot(&100), None);
+        assert_eq!(mmap.get_slot(&100), None);
     }
 
     #[test]
@@ -566,9 +566,9 @@ mod tests {
         }
 
         // delete slot 10
-        assert!(!mmap.read_slot(&10).unwrap().deleted);
+        assert!(!mmap.get_slot(&10).unwrap().deleted);
         mmap.delete_value(10).unwrap();
-        assert!(mmap.read_slot(&10).unwrap().deleted);
+        assert!(mmap.get_slot(&10).unwrap().deleted);
 
         assert_eq!(mmap.all_values().len(), 100);
         assert_eq!(mmap.values().len(), 99)
@@ -592,11 +592,11 @@ mod tests {
         mmap.push_value(Some(foo.binary().as_slice())).unwrap();
 
         // read slots & values
-        let slot = mmap.read_slot(&0).unwrap();
+        let slot = mmap.get_slot(&0).unwrap();
         assert_eq!(slot.offset, 33_554_304);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 1, qux: true };
-        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         // update value
@@ -604,8 +604,8 @@ mod tests {
         mmap.update_value(0, new_foo.binary().as_slice()).unwrap();
 
         // read slots & values
-        let slot = mmap.read_slot(&0).unwrap();
-        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
+        let slot = mmap.get_slot(&0).unwrap();
+        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, new_foo);
     }
 }
