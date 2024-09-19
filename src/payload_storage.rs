@@ -37,7 +37,7 @@ impl PayloadStorage {
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
         let (page_id, slot_id) = *self.page_tracker.get(&point_offset)?;
         let page = self.pages.get(&page_id).expect("page not found");
-        let raw = page.read_raw(&slot_id);
+        let raw = page.read_value(&slot_id);
         raw.map(Payload::from_binary)
     }
 

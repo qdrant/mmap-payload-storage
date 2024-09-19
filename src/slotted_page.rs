@@ -3,6 +3,7 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -29,15 +30,29 @@ impl SlottedPageHeader {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Slot {
-    offset: u64, // 8 bytes
-    length: u64, // 8 bytes
-    deleted: bool, // 1 byte
-                 // 7 bytes padding for alignment
+    offset: u64,      // offset in the page (8 bytes)
+    length: u64,      // length of the value (8 bytes)
+    left_padding: u8, // padding within the value for small values (1 byte)
+    deleted: bool,    // whether the value has been deleted (1 byte)
+                      // 6 bytes padding for alignment
 }
 
 impl Slot {
     const fn size_in_bytes() -> usize {
-        24 // 8 + 8 + 1 + 7 padding
+        24 // 8 + 8 + 1 + + 1 + 6 padding
+    }
+
+    fn new(offset: u64, length: u64, left_padding: u8, deleted: bool) -> Slot {
+        assert!(
+            length >= SlottedPageMmap::MIN_VALUE_SIZE_BYTES as u64,
+            "Value too small"
+        );
+        Slot {
+            offset,
+            length,
+            left_padding,
+            deleted,
+        }
     }
 }
 
@@ -61,6 +76,11 @@ impl SlottedPageMmap {
     const PLACEHOLDER_VALUE: [u8; SlottedPageMmap::MIN_VALUE_SIZE_BYTES] =
         [0; SlottedPageMmap::MIN_VALUE_SIZE_BYTES];
 
+    //Flushes outstanding memory map modifications to disk.
+    fn flush(&self) {
+        self.mmap.flush().unwrap();
+    }
+
     // Return all values in the page with deleted values as None
     fn all_values(&self) -> Vec<Option<&[u8]>> {
         let mut values = Vec::new();
@@ -71,7 +91,7 @@ impl SlottedPageMmap {
                 values.push(None);
                 continue;
             }
-            match self.read_raw_value(&slot) {
+            match self.read_slot_value(&slot) {
                 Some(value) => values.push(Some(value)),
                 None => values.push(None),
             }
@@ -89,7 +109,7 @@ impl SlottedPageMmap {
             if slot.deleted {
                 continue;
             }
-            if let Some(value) = self.read_raw_value(&slot) {
+            if let Some(value) = self.read_slot_value(&slot) {
                 values.push(value)
             }
         }
@@ -123,9 +143,9 @@ impl SlottedPageMmap {
     }
 
     // Read raw value associated with the slot id.
-    pub fn read_raw(&self, slot_id: &u32) -> Option<&[u8]> {
+    pub fn read_value(&self, slot_id: &u32) -> Option<&[u8]> {
         let slot = self.read_slot(slot_id)?;
-        self.read_raw_value(&slot)
+        self.read_slot_value(&slot)
     }
 
     fn read_slot(&self, slot_id: &u32) -> Option<Slot> {
@@ -143,10 +163,11 @@ impl SlottedPageMmap {
     }
 
     // Read value associated with the slot
-    fn read_raw_value(&self, slot: &Slot) -> Option<&[u8]> {
-        let start = slot.offset as usize;
-        let end = start + slot.length as usize;
-        let value = &self.mmap[start..end];
+    fn read_slot_value(&self, slot: &Slot) -> Option<&[u8]> {
+        let start = slot.offset;
+        // adjust the end to account for the left padding
+        let end = start + slot.length - slot.left_padding as u64;
+        let value = &self.mmap[start as usize..end as usize];
         if value == SlottedPageMmap::PLACEHOLDER_VALUE {
             None
         } else {
@@ -154,10 +175,16 @@ impl SlottedPageMmap {
         }
     }
 
-    // check if there is enough space for a new slot + placeholder value
-    fn has_capacity(&self) -> bool {
+    // check if there is enough space for a new slot + min value
+    fn has_capacity_for_min_value(&self) -> bool {
         self.free_space()
             .saturating_sub(Slot::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES)
+            != 0
+    }
+
+    fn has_capacity_for_value(&self, extra_len: usize) -> bool {
+        self.free_space()
+            .saturating_sub(Slot::size_in_bytes() + extra_len)
             != 0
     }
 
@@ -190,38 +217,57 @@ impl SlottedPageMmap {
     // - None if there is not enough space for a new slot + value
     // - Some(slot_id) if the value was successfully added
     pub fn push(&mut self, value: Option<&[u8]>) -> Option<usize> {
-        // check if there is enough space for a new slot + placeholder value
-        if !self.has_capacity() {
-            return None;
+        // check if there is enough space the value
+        match value {
+            Some(v) => {
+                if !self.has_capacity_for_value(v.len()) {
+                    return None;
+                }
+            }
+            None => {
+                if !self.has_capacity_for_min_value() {
+                    return None;
+                }
+            }
         }
 
-        // TODO check if the value is smaller than the minimum value size
-
         // size of the value in bytes
-        let value_size = value
+        let real_value_size = value
             .map(|v| v.len())
             .unwrap_or(SlottedPageMmap::MIN_VALUE_SIZE_BYTES);
 
-        let value_bytes = value.unwrap_or(&SlottedPageMmap::PLACEHOLDER_VALUE);
+        // value bytes
+        let real_value_bytes = value.unwrap_or(&SlottedPageMmap::PLACEHOLDER_VALUE);
+
+        // padding to align the value to the end of the page
+        let padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
+
+        // actual value size accounting for the minimum value size
+        let value_len = real_value_size + padding;
+
+        // data grows from the end of the page
+        let new_data_start_offset = self.header.data_start_offset as usize - value_len;
 
         // add slot
         let slot_count = self.header.slot_count;
         let next_slot_id = slot_count as usize;
         let (slot_start, slot_end) = self.offsets_for_slot(next_slot_id);
-
-        // data grows from the end of the page
-        let new_data_start_offset = self.header.data_start_offset as usize - value_size;
-
-        let slot = Slot {
-            offset: new_data_start_offset as u64,
-            length: value_size as u64,
-            deleted: false,
-        };
+        let slot = Slot::new(
+            new_data_start_offset as u64,
+            value_len as u64,
+            padding as u8,
+            false,
+        );
         self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&slot));
 
         // set value region
-        let value_end = new_data_start_offset + value_size;
-        self.mmap[new_data_start_offset..value_end].copy_from_slice(value_bytes);
+        let value_end = new_data_start_offset + real_value_size;
+        self.mmap[new_data_start_offset..value_end].copy_from_slice(real_value_bytes);
+
+        // set left padding for values that are smaller than the minimum value size
+        if padding > 0 {
+            self.mmap[value_end..value_end + padding].copy_from_slice(&vec![0; padding]);
+        }
 
         // update header
         self.header.data_start_offset = new_data_start_offset as u64;
@@ -239,13 +285,12 @@ impl SlottedPageMmap {
 
         // mark slot as deleted
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
-        let slot = self.read_slot(&(slot_id as u32))?;
-        let slot = Slot {
-            offset: slot.offset,
-            length: slot.length,
+        let current_slot = self.read_slot(&(slot_id as u32))?;
+        let updated_slot = Slot {
             deleted: true,
+            ..current_slot
         };
-        self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&slot));
+        self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&updated_slot));
         Some(())
     }
 
@@ -255,7 +300,7 @@ impl SlottedPageMmap {
     /// Returns
     /// - None if the slot_id is out of bounds or the new value is larger than the current value (caller needs a new page)
     /// - Some(()) if the value was successfully updated
-    pub fn update_value(&mut self, slot_id: usize, value: &[u8]) -> Option<()> {
+    pub fn update_value(&mut self, slot_id: usize, new_value: &[u8]) -> Option<()> {
         let slot_count = self.header.slot_count;
         if slot_id >= slot_count as usize {
             return None;
@@ -263,49 +308,45 @@ impl SlottedPageMmap {
 
         let slot = self.read_slot(&(slot_id as u32))?;
 
-        let value_size = value.len();
-        let value_bytes = value;
+        let real_value_size = new_value.len();
 
         // check if there is enough space for the new value
-        if value_size > slot.length as usize {
+        if real_value_size > slot.length as usize {
             return None;
         }
 
         // update value region
-        let value_end = slot.offset as usize + slot.length as usize;
-        let value_start = value_end - value_size;
-        self.mmap[value_start..value_end].copy_from_slice(value_bytes);
+        let value_start = slot.offset as usize;
+        let value_end = value_start + real_value_size;
+        self.mmap[value_start..value_end].copy_from_slice(new_value);
+        let left_padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
+        if left_padding > 0 {
+            self.mmap[value_end..value_end + left_padding].copy_from_slice(&vec![0; left_padding]);
+        }
 
         // update slot
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
 
-        // TODO make sure that we keep at least the minimum value size
-        // prepend with zeros if the new value is smaller than minimum value size
-        let update_slot = Slot {
-            offset: value_start as u64, // new offset value
-            length: value_size as u64,  // new value size
-            deleted: true,              // mark as non deleted
-        };
+        // actual value size accounting for the minimum value size
+        let value_len = real_value_size + left_padding;
+        let update_slot = Slot::new(
+            value_start as u64, // new offset value
+            value_len as u64,   // new value size
+            left_padding as u8, // new padding
+            true,               // mark as non deleted
+        );
         self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&update_slot));
-
-        // check if it was the last value in the page (where the data_start_offset points to)
-        let page_data_start = self.header.data_start_offset as usize;
-        if slot.offset as usize == page_data_start {
-            // update page header
-            self.header.data_start_offset = value_start as u64;
-            self.persist_page_header();
-            return Some(());
-        }
 
         Some(())
     }
 
     pub fn compact(&mut self) {
         // TODO
+        // - remove deleted slots and values
         // - shift all values to the end of the page
         // - update slot offsets
         // - update header
-        // - the page tracker needs to be updated!
+        // - the page tracker needs to be updated accordingly!
     }
 }
 
@@ -392,7 +433,7 @@ mod tests {
 
         let mut free_space = mmap.free_space();
         // add placeholder values
-        while mmap.has_capacity() {
+        while mmap.has_capacity_for_min_value() {
             mmap.push_placeholder().unwrap();
             let new_free_space = mmap.free_space();
             assert!(new_free_space < free_space);
@@ -441,17 +482,17 @@ mod tests {
         let slot = mmap.read_slot(&0).unwrap();
         assert_eq!(slot.offset, 33_554_304);
         assert_eq!(slot.length, 128);
-        assert_eq!(mmap.read_raw_value(&slot), None);
+        assert_eq!(mmap.read_slot_value(&slot), None);
 
         let slot = mmap.read_slot(&1).unwrap();
         assert_eq!(slot.offset, 33_554_176);
         assert_eq!(slot.length, 128);
-        assert_eq!(mmap.read_raw_value(&slot), None);
+        assert_eq!(mmap.read_slot_value(&slot), None);
 
         let slot = mmap.read_slot(&2).unwrap();
         assert_eq!(slot.offset, 33_554_048);
         assert_eq!(slot.length, 128);
-        assert_eq!(mmap.read_raw_value(&slot), None);
+        assert_eq!(mmap.read_slot_value(&slot), None);
 
         // query non-existing slot
         assert_eq!(mmap.read_slot(&10), None);
@@ -480,28 +521,28 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 100);
-        assert_eq!(mmap.free_space(), 33_550_840);
+        assert_eq!(mmap.free_space(), 33_539_216);
 
         // read slots & values
         let slot = mmap.read_slot(&0).unwrap();
-        assert_eq!(slot.offset, 33_554_421);
-        assert_eq!(slot.length, 11);
+        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.length, 128);
         let expected = Foo { bar: 0, qux: true };
-        let actual = Foo::from_binary(mmap.read_raw_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         let slot = mmap.read_slot(&1).unwrap();
-        assert_eq!(slot.offset, 33_554_410);
-        assert_eq!(slot.length, 11);
+        assert_eq!(slot.offset, 33_554_176);
+        assert_eq!(slot.length, 128);
         let expected = Foo { bar: 1, qux: false };
-        let actual = Foo::from_binary(mmap.read_raw_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         let slot = mmap.read_slot(&2).unwrap();
-        assert_eq!(slot.offset, 33_554_399);
-        assert_eq!(slot.length, 11);
+        assert_eq!(slot.offset, 33_554_048);
+        assert_eq!(slot.length, 128);
         let expected = Foo { bar: 2, qux: true };
-        let actual = Foo::from_binary(mmap.read_raw_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         // query non-existing slot
@@ -556,10 +597,10 @@ mod tests {
 
         // read slots & values
         let slot = mmap.read_slot(&0).unwrap();
-        assert_eq!(slot.offset, 33_554_421);
-        assert_eq!(slot.length, 11);
+        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.length, 128);
         let expected = Foo { bar: 1, qux: true };
-        let actual = Foo::from_binary(mmap.read_raw_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         // update value
@@ -568,7 +609,7 @@ mod tests {
 
         // read slots & values
         let slot = mmap.read_slot(&0).unwrap();
-        let actual = Foo::from_binary(mmap.read_raw_value(&slot).unwrap());
+        let actual = Foo::from_binary(mmap.read_slot_value(&slot).unwrap());
         assert_eq!(actual, new_foo);
     }
 }
