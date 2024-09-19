@@ -131,7 +131,7 @@ impl SlottedPageMmap {
 
     pub fn open(path: &Path) -> SlottedPageMmap {
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
-        let header: &SlottedPageHeader  = transmute_from_u8(&mmap[0..16]);
+        let header: &SlottedPageHeader = transmute_from_u8(&mmap[0..16]);
         let header = header.clone();
         let path = path.to_path_buf();
         SlottedPageMmap { path, header, mmap }
@@ -206,7 +206,7 @@ impl SlottedPageMmap {
     }
 
     pub fn push_placeholder(&mut self) -> Option<usize> {
-        self.push(None)
+        self.push_value(None)
     }
 
     // Push a new value to the page
@@ -214,7 +214,7 @@ impl SlottedPageMmap {
     // Returns
     // - None if there is not enough space for a new slot + value
     // - Some(slot_id) if the value was successfully added
-    pub fn push(&mut self, value: Option<&[u8]>) -> Option<usize> {
+    pub fn push_value(&mut self, value: Option<&[u8]>) -> Option<usize> {
         // check if there is enough space the value
         match value {
             Some(v) => {
@@ -274,7 +274,7 @@ impl SlottedPageMmap {
     }
 
     /// Mark a slot as deleted logically.
-    pub fn delete(&mut self, slot_id: usize) -> Option<()> {
+    pub fn delete_value(&mut self, slot_id: usize) -> Option<()> {
         let slot_count = self.header.slot_count;
         if slot_id >= slot_count as usize {
             return None;
@@ -513,7 +513,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.push(Some(foo.binary().as_slice())).unwrap();
+            mmap.push_value(Some(foo.binary().as_slice())).unwrap();
         }
 
         assert_eq!(mmap.header.slot_count, 100);
@@ -562,12 +562,12 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.push(Some(foo.binary().as_slice())).unwrap();
+            mmap.push_value(Some(foo.binary().as_slice())).unwrap();
         }
 
         // delete slot 10
         assert!(!mmap.read_slot(&10).unwrap().deleted);
-        mmap.delete(10).unwrap();
+        mmap.delete_value(10).unwrap();
         assert!(mmap.read_slot(&10).unwrap().deleted);
 
         assert_eq!(mmap.all_values().len(), 100);
@@ -589,7 +589,7 @@ mod tests {
 
         // push one value
         let foo = Foo { bar: 1, qux: true };
-        mmap.push(Some(foo.binary().as_slice())).unwrap();
+        mmap.push_value(Some(foo.binary().as_slice())).unwrap();
 
         // read slots & values
         let slot = mmap.read_slot(&0).unwrap();
