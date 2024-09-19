@@ -1,5 +1,5 @@
 use crate::payload::Payload;
-use crate::slotted_page::SlottedPageMmap;
+use crate::slotted_page::{SlotId, SlottedPageMmap};
 use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -7,7 +7,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 type PointOffset = u32;
-type PagePointer = (u32, u32); // (PageId, SlotId)
+type PageId = u32;
+
+#[derive(Clone, Copy)]
+struct PagePointer {
+    page_id: PageId,
+    slot_id: SlotId,
+}
 
 struct PayloadStorage {
     page_tracker: Vec<Option<PagePointer>>, // points_offsets are contiguous
@@ -39,25 +45,27 @@ impl PayloadStorage {
             .join(format!("slotted-paged-{}.dat", page_id))
     }
 
-    /// Add a page to the storage
-    fn add_page(&mut self, page_id: u32, page: SlottedPageMmap) {
+    /// Add a page to the storage. If it already exists, returns false
+    fn add_page(&mut self, page_id: u32, page: SlottedPageMmap) -> bool {
         let page_exists = self.pages.contains_key(&page_id);
         if page_exists {
-            panic!("page already exists");
+            return false;
         }
         self.pages.insert(page_id, Arc::new(RwLock::new(page)));
+
+        true
     }
 
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
-        let mapping = self.page_tracker.get(point_offset as usize)?;
-        let (page_id, slot_id) = (*mapping)?;
-        let page = self.pages.get(&page_id).expect("page not found");
+        let PagePointer { page_id, slot_id } =
+            self.page_tracker.get(point_offset as usize)?.as_ref()?;
+        let page = self.pages.get(page_id).expect("page not found");
         let page_guard = page.read();
-        let raw = page_guard.get_value(&slot_id);
+        let raw = page_guard.get_value(slot_id);
         raw.map(|pb| {
             let decompressed = Self::decompress(pb);
-            Payload::from_binary(&decompressed)
+            Payload::from_bytes(&decompressed)
         })
     }
 
@@ -100,11 +108,8 @@ impl PayloadStorage {
     }
 
     /// Get the mapping for a given point offset
-    fn get_mapping(&self, point_offset: PointOffset) -> Option<PagePointer> {
-        self.page_tracker
-            .get(point_offset as usize)
-            .cloned()
-            .flatten()
+    fn get_mapping(&self, point_offset: PointOffset) -> Option<&PagePointer> {
+        self.page_tracker.get(point_offset as usize)?.as_ref()
     }
 
     /// Put a payload in the storage
@@ -113,13 +118,14 @@ impl PayloadStorage {
             self.create_new_page();
         }
 
-        let payload_bin = Self::compress(&payload.binary());
-        let payload_size = size_of_val(&payload_bin);
+        let comp_payload = Self::compress(&payload.to_bytes());
+        let payload_size = size_of_val(&comp_payload);
 
-        if let Some((page_id, slot_id)) = self.get_mapping(point_offset) {
+        if let Some(PagePointer { page_id, slot_id }) = self.get_mapping(point_offset).copied() {
             let page = self.pages.get_mut(&page_id).unwrap();
-            let updated = page.write().update_value(slot_id as usize, &payload_bin);
+            let updated = page.write().update_value(slot_id, &comp_payload);
             if updated.is_none() {
+                todo!("handle update in a new page")
                 // TODO handle update in a new page
                 // delete value from old page
                 // find a new page (or create a new one if all full)
@@ -135,23 +141,26 @@ impl PayloadStorage {
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
-            let slot_id = page.write().insert_value(&payload_bin).unwrap();
+            let slot_id = page.write().insert_value(&comp_payload).unwrap();
             // ensure page_tracker is long enough
             if self.page_tracker.len() <= point_offset as usize {
                 self.page_tracker.resize(point_offset as usize + 1, None);
             }
             // update page_tracker
-            self.page_tracker[point_offset as usize] = Some((page_id, slot_id as u32));
+            self.page_tracker[point_offset as usize] = Some(PagePointer {
+                page_id,
+                slot_id: slot_id as u32,
+            });
         }
     }
 
     /// Delete a payload from the storage
     /// Returns None if the point_offset, page, or payload was not found
     pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<()> {
-        let (page_id, slot_id) = self.get_mapping(point_offset)?;
+        let PagePointer { page_id, slot_id } = self.get_mapping(point_offset).copied()?;
         let page = self.pages.get_mut(&page_id)?;
         // delete value from page
-        page.write().delete_value(slot_id as usize);
+        page.write().delete_value(slot_id);
         // delete mapping
         self.page_tracker[point_offset as usize] = None;
         Some(())
@@ -207,8 +216,8 @@ mod tests {
         assert_eq!(storage.page_tracker.len(), 1);
 
         let page_mapping = storage.get_mapping(0).unwrap();
-        assert_eq!(page_mapping.0, 1); // first page
-        assert_eq!(page_mapping.1, 0); // first slot
+        assert_eq!(page_mapping.page_id, 1); // first page
+        assert_eq!(page_mapping.slot_id, 0); // first slot
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -231,8 +240,8 @@ mod tests {
         assert_eq!(storage.pages.len(), 1);
 
         let page_mapping = storage.get_mapping(0).unwrap();
-        assert_eq!(page_mapping.0, 1); // first page
-        assert_eq!(page_mapping.1, 0); // first slot
+        assert_eq!(page_mapping.page_id, 1); // first page
+        assert_eq!(page_mapping.slot_id, 0); // first slot
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -264,8 +273,8 @@ mod tests {
         assert_eq!(storage.page_tracker.len(), 1);
 
         let page_mapping = storage.get_mapping(0).unwrap();
-        assert_eq!(page_mapping.0, 1); // first page
-        assert_eq!(page_mapping.1, 0); // first slot
+        assert_eq!(page_mapping.page_id, 1); // first page
+        assert_eq!(page_mapping.slot_id, 0); // first slot
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());

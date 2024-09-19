@@ -11,11 +11,11 @@ impl Default for Payload {
 }
 
 impl Payload {
-    pub fn binary(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Vec<u8> {
         serde_cbor::to_vec(self).unwrap()
     }
 
-    pub fn from_binary(data: &[u8]) -> Self {
+    pub fn from_bytes(data: &[u8]) -> Self {
         serde_cbor::from_slice(data).unwrap()
     }
 }
@@ -31,9 +31,9 @@ mod tests {
             "key".to_string(),
             serde_json::Value::String("value".to_string()),
         );
-        let binary = payload.binary();
+        let bytes = payload.to_bytes();
 
-        let deserialized = Payload::from_binary(&binary);
+        let deserialized = Payload::from_bytes(&bytes);
         assert_eq!(payload, deserialized);
     }
 }

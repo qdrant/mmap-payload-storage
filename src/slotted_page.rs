@@ -5,6 +5,8 @@ use crate::utils_copied::mmap_ops::{
 use memmap2::MmapMut;
 use std::path::{Path, PathBuf};
 
+pub type SlotId = u32;
+
 #[derive(Debug, Clone)]
 struct SlottedPageHeader {
     slot_count: u64,
@@ -18,29 +20,30 @@ impl SlottedPageHeader {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Slot {
+struct SlotHeader {
     offset: u64,      // offset in the page (8 bytes)
     length: u64,      // length of the value (8 bytes)
     left_padding: u8, // padding within the value for small values (1 byte)
     deleted: bool,    // whether the value has been deleted (1 byte)
-                      // 6 bytes padding for alignment
+    _align: [u8; 6],  // 6 bytes padding for alignment
 }
 
-impl Slot {
+impl SlotHeader {
     const fn size_in_bytes() -> usize {
         24 // 8 + 8 + 1 + 1 + 6 padding
     }
 
-    fn new(offset: u64, length: u64, left_padding: u8, deleted: bool) -> Slot {
+    fn new(offset: u64, length: u64, left_padding: u8, deleted: bool) -> SlotHeader {
         assert!(
             length >= SlottedPageMmap::MIN_VALUE_SIZE_BYTES as u64,
             "Value too small"
         );
-        Slot {
+        SlotHeader {
             offset,
             length,
             left_padding,
             deleted,
+            _align: [0; 6],
         }
     }
 }
@@ -57,7 +60,7 @@ impl SlottedPageMmap {
     pub const SLOTTED_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
 
     /// Expect JSON values to have roughly 3–5 fields with mostly small values.
-    /// Therefore, reserve 100 bytes for each value in order to avoid frequent reallocations.
+    /// Therefore, reserve 128 bytes for each value in order to avoid frequent reallocations.
     /// For 1M values, this would require 128MB of memory.
     const MIN_VALUE_SIZE_BYTES: usize = 128;
 
@@ -114,9 +117,9 @@ impl SlottedPageMmap {
     }
 
     /// Write the slot to the memory map
-    fn write_slot(&mut self, slot_id: usize, update_slot: Slot) {
+    fn write_slot(&mut self, slot_id: SlotId, slot_header: SlotHeader) {
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
-        self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&update_slot));
+        self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&slot_header));
     }
 
     /// Create a new page at the given path
@@ -152,22 +155,22 @@ impl SlottedPageMmap {
     }
 
     /// Get the slot associated with the slot id.
-    fn get_slot(&self, slot_id: &u32) -> Option<Slot> {
+    fn get_slot(&self, slot_id: &u32) -> Option<SlotHeader> {
         let slot_count = self.header.slot_count;
         if *slot_id >= slot_count as u32 {
             return None;
         }
 
         let slot_offset =
-            SlottedPageHeader::size_in_bytes() + *slot_id as usize * Slot::size_in_bytes();
+            SlottedPageHeader::size_in_bytes() + *slot_id as usize * SlotHeader::size_in_bytes();
         let start = slot_offset;
-        let end = start + Slot::size_in_bytes();
-        let slot: &Slot = transmute_from_u8(&self.mmap[start..end]);
+        let end = start + SlotHeader::size_in_bytes();
+        let slot: &SlotHeader = transmute_from_u8(&self.mmap[start..end]);
         Some(slot.clone())
     }
 
     /// Get value associated with the slot
-    fn get_slot_value(&self, slot: &Slot) -> Option<&[u8]> {
+    fn get_slot_value(&self, slot: &SlotHeader) -> Option<&[u8]> {
         let start = slot.offset;
         // adjust the end to account for the left padding
         let end = start + slot.length - slot.left_padding as u64;
@@ -182,14 +185,14 @@ impl SlottedPageMmap {
     /// Check if there is enough space for a new slot + min value
     fn has_capacity_for_min_value(&self) -> bool {
         self.free_space()
-            .saturating_sub(Slot::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES)
+            .saturating_sub(SlotHeader::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES)
             != 0
     }
 
     /// Check if there is enough space for a new slot + value
     fn has_capacity_for_value(&self, extra_len: usize) -> bool {
         self.free_space()
-            .saturating_sub(Slot::size_in_bytes() + extra_len)
+            .saturating_sub(SlotHeader::size_in_bytes() + extra_len)
             != 0
     }
 
@@ -201,21 +204,22 @@ impl SlottedPageMmap {
             return self.mmap.len() - SlottedPageHeader::size_in_bytes();
         }
         let last_slot_offset =
-            SlottedPageHeader::size_in_bytes() + slot_count * Slot::size_in_bytes();
+            SlottedPageHeader::size_in_bytes() + slot_count * SlotHeader::size_in_bytes();
         let data_start_offset = self.header.data_start_offset as usize;
         data_start_offset.saturating_sub(last_slot_offset)
     }
 
     /// Compute the start and end offsets for the slot
-    fn offsets_for_slot(&self, slot_id: usize) -> (usize, usize) {
-        let slot_offset = SlottedPageHeader::size_in_bytes() + slot_id * Slot::size_in_bytes();
+    fn offsets_for_slot(&self, slot_id: SlotId) -> (usize, usize) {
+        let slot_offset =
+            SlottedPageHeader::size_in_bytes() + slot_id as usize * SlotHeader::size_in_bytes();
         let start = slot_offset;
-        let end = start + Slot::size_in_bytes();
+        let end = start + SlotHeader::size_in_bytes();
         (start, end)
     }
 
     /// Insert a new placeholder into the page
-    pub fn insert_placeholder_value(&mut self) -> Option<usize> {
+    pub fn insert_placeholder_value(&mut self) -> Option<SlotId> {
         self.insert_value(&SlottedPageMmap::PLACEHOLDER_VALUE)
     }
 
@@ -224,7 +228,7 @@ impl SlottedPageMmap {
     /// Returns
     /// - None if there is not enough space for a new slot + value
     /// - Some(slot_id) if the value was successfully added
-    pub fn insert_value(&mut self, value: &[u8]) -> Option<usize> {
+    pub fn insert_value(&mut self, value: &[u8]) -> Option<SlotId> {
         // check if there is enough space the value
         if !self.has_capacity_for_value(value.len()) {
             return None;
@@ -244,8 +248,8 @@ impl SlottedPageMmap {
 
         // add slot
         let slot_count = self.header.slot_count;
-        let next_slot_id = slot_count as usize;
-        let slot = Slot::new(
+        let next_slot_id = slot_count as SlotId;
+        let slot = SlotHeader::new(
             new_data_start_offset as u64,
             value_len as u64,
             padding as u8,
@@ -270,16 +274,16 @@ impl SlottedPageMmap {
     }
 
     /// Mark a slot as deleted.
-    pub fn delete_value(&mut self, slot_id: usize) -> Option<()> {
+    pub fn delete_value(&mut self, slot_id: SlotId) -> Option<()> {
         let slot_count = self.header.slot_count;
-        if slot_id >= slot_count as usize {
+        if slot_id as u64 >= slot_count {
             return None;
         }
 
         // mark slot as deleted
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
-        let current_slot = self.get_slot(&(slot_id as u32))?;
-        let updated_slot = Slot {
+        let current_slot = self.get_slot(&slot_id)?;
+        let updated_slot = SlotHeader {
             deleted: true,
             ..current_slot
         };
@@ -293,13 +297,13 @@ impl SlottedPageMmap {
     /// Returns
     /// - None if the slot_id is out of bounds or the new value is larger than the current value (caller needs a new page)
     /// - Some(()) if the value was successfully updated
-    pub fn update_value(&mut self, slot_id: usize, new_value: &[u8]) -> Option<()> {
+    pub fn update_value(&mut self, slot_id: SlotId, new_value: &[u8]) -> Option<()> {
         let slot_count = self.header.slot_count;
-        if slot_id >= slot_count as usize {
+        if slot_id as u64 >= slot_count {
             return None;
         }
 
-        let slot = self.get_slot(&(slot_id as u32))?;
+        let slot = self.get_slot(&slot_id)?;
 
         let real_value_size = new_value.len();
 
@@ -320,7 +324,7 @@ impl SlottedPageMmap {
         // update slot
         // actual value size accounting for the minimum value size
         let value_len = real_value_size + left_padding;
-        let update_slot = Slot::new(
+        let update_slot = SlotHeader::new(
             value_start as u64, // new offset value
             value_len as u64,   // new value size
             left_padding as u8, // new padding
@@ -356,11 +360,11 @@ mod tests {
     }
 
     impl Foo {
-        pub fn binary(&self) -> Vec<u8> {
+        pub fn to_bytes(&self) -> Vec<u8> {
             serde_cbor::to_vec(self).unwrap()
         }
 
-        pub fn from_binary(data: &[u8]) -> Self {
+        pub fn from_bytes(data: &[u8]) -> Self {
             serde_cbor::from_slice(data).unwrap()
         }
     }
@@ -375,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_slot_size() {
-        assert_eq!(Slot::size_in_bytes(), size_of::<Slot>());
+        assert_eq!(SlotHeader::size_in_bytes(), size_of::<SlotHeader>());
     }
 
     #[test]
@@ -509,7 +513,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.insert_value(foo.binary().as_slice()).unwrap();
+            mmap.insert_value(foo.to_bytes().as_slice()).unwrap();
         }
 
         assert_eq!(mmap.header.slot_count, 100);
@@ -520,21 +524,21 @@ mod tests {
         assert_eq!(slot.offset, 33_554_304);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 0, qux: true };
-        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
+        let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         let slot = mmap.get_slot(&1).unwrap();
         assert_eq!(slot.offset, 33_554_176);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 1, qux: false };
-        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
+        let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         let slot = mmap.get_slot(&2).unwrap();
         assert_eq!(slot.offset, 33_554_048);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 2, qux: true };
-        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
+        let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         // query non-existing slot
@@ -558,7 +562,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.insert_value(foo.binary().as_slice()).unwrap();
+            mmap.insert_value(foo.to_bytes().as_slice()).unwrap();
         }
 
         // delete slot 10
@@ -585,23 +589,23 @@ mod tests {
 
         // push one value
         let foo = Foo { bar: 1, qux: true };
-        mmap.insert_value(foo.binary().as_slice()).unwrap();
+        mmap.insert_value(foo.to_bytes().as_slice()).unwrap();
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
         assert_eq!(slot.offset, 33_554_304);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 1, qux: true };
-        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
+        let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         // update value
         let new_foo = Foo { bar: 2, qux: false };
-        mmap.update_value(0, new_foo.binary().as_slice()).unwrap();
+        mmap.update_value(0, new_foo.to_bytes().as_slice()).unwrap();
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
-        let actual = Foo::from_binary(mmap.get_slot_value(&slot).unwrap());
+        let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, new_foo);
     }
 }
