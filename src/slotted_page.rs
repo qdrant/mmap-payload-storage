@@ -3,10 +3,9 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SlottedPageHeader {
     slot_count: u64,
     data_start_offset: u64,
@@ -15,16 +14,6 @@ struct SlottedPageHeader {
 impl SlottedPageHeader {
     const fn size_in_bytes() -> usize {
         8 + 8
-    }
-
-    fn read_from_mmap(mmap: &MmapMut) -> SlottedPageHeader {
-        let slot_count = u64::from_le_bytes(mmap[0..8].try_into().unwrap());
-        let data_start_offset = u64::from_le_bytes(mmap[8..16].try_into().unwrap());
-
-        SlottedPageHeader {
-            slot_count,
-            data_start_offset,
-        }
     }
 }
 
@@ -118,8 +107,13 @@ impl SlottedPageMmap {
         values
     }
 
-    fn persist_page_header(&mut self) {
+    fn write_page_header(&mut self) {
         self.mmap[0..16].copy_from_slice(transmute_to_u8(&self.header));
+    }
+
+    fn write_slot(&mut self, slot_id: usize, update_slot: Slot) {
+        let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
+        self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&update_slot));
     }
 
     pub fn new(path: &Path, page_size: usize) -> SlottedPageMmap {
@@ -131,18 +125,22 @@ impl SlottedPageMmap {
         };
         let path = path.to_path_buf();
         let mut slotted_mmap = SlottedPageMmap { path, header, mmap };
-        slotted_mmap.persist_page_header();
+        slotted_mmap.write_page_header();
         slotted_mmap
     }
 
     pub fn open(path: &Path) -> SlottedPageMmap {
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
-        let header = SlottedPageHeader::read_from_mmap(&mmap);
+        let header: &SlottedPageHeader  = transmute_from_u8(&mmap[0..16]);
+        let header = header.clone();
         let path = path.to_path_buf();
         SlottedPageMmap { path, header, mmap }
     }
 
     // Read raw value associated with the slot id.
+    // Filters out:
+    // - deleted slots
+    // - placeholder values
     pub fn read_value(&self, slot_id: &u32) -> Option<&[u8]> {
         let slot = self.read_slot(slot_id)?;
         self.read_slot_value(&slot)
@@ -251,14 +249,13 @@ impl SlottedPageMmap {
         // add slot
         let slot_count = self.header.slot_count;
         let next_slot_id = slot_count as usize;
-        let (slot_start, slot_end) = self.offsets_for_slot(next_slot_id);
         let slot = Slot::new(
             new_data_start_offset as u64,
             value_len as u64,
             padding as u8,
             false,
         );
-        self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&slot));
+        self.write_slot(next_slot_id, slot);
 
         // set value region
         let value_end = new_data_start_offset + real_value_size;
@@ -272,7 +269,7 @@ impl SlottedPageMmap {
         // update header
         self.header.data_start_offset = new_data_start_offset as u64;
         self.header.slot_count += 1;
-        self.persist_page_header();
+        self.write_page_header();
         Some(next_slot_id)
     }
 
@@ -325,8 +322,6 @@ impl SlottedPageMmap {
         }
 
         // update slot
-        let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
-
         // actual value size accounting for the minimum value size
         let value_len = real_value_size + left_padding;
         let update_slot = Slot::new(
@@ -335,18 +330,19 @@ impl SlottedPageMmap {
             left_padding as u8, // new padding
             true,               // mark as non deleted
         );
-        self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&update_slot));
+        self.write_slot(slot_id, update_slot);
 
         Some(())
     }
 
+    // TODO
+    // - remove deleted slots and values
+    // - shift all values to the end of the page
+    // - update slot offsets
+    // - update header
+    // - the page tracker needs to be updated accordingly!
     pub fn compact(&mut self) {
-        // TODO
-        // - remove deleted slots and values
-        // - shift all values to the end of the page
-        // - update slot offsets
-        // - update header
-        // - the page tracker needs to be updated accordingly!
+        todo!("Compact the page");
     }
 }
 
