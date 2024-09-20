@@ -178,7 +178,7 @@ impl SlottedPageMmap {
             .checked_add(slot.length)
             .expect("start + length should not overflow")
             - slot.left_padding as u64;
-        
+
         let value = &self.mmap[start as usize..end as usize];
         if value == SlottedPageMmap::PLACEHOLDER_VALUE {
             None
@@ -311,7 +311,6 @@ impl SlottedPageMmap {
         let slot = self.get_slot(&slot_id)?;
 
         let real_value_size = new_value.len();
-
         // check if there is enough space for the new value
         if real_value_size > slot.length as usize {
             return None;
@@ -355,6 +354,7 @@ impl SlottedPageMmap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
     use serde::{Deserialize, Serialize};
     use tempfile::Builder;
 
@@ -612,5 +612,77 @@ mod tests {
         let slot = mmap.get_slot(&0).unwrap();
         let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, new_foo);
+    }
+
+    #[test]
+    fn test_update_smaller_from_placeholder() {
+        let file = Builder::new()
+            .prefix("test-pages")
+            .suffix(".data")
+            .tempfile()
+            .unwrap();
+        let path = file.path();
+
+        let mut mmap = SlottedPageMmap::new(path, SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES);
+        let values = mmap.all_values();
+        assert_eq!(values.len(), 0);
+
+        // push placeholder value
+        mmap.insert_placeholder_value().unwrap();
+        let values = mmap.all_values();
+        assert_eq!(values.len(), 1);
+        assert_eq!(mmap.get_value(&0), None);
+
+        let slot = mmap.get_slot(&0).unwrap();
+        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.length, 128);
+
+        // update value from placeholder
+        let foo = Foo { bar: 1, qux: true };
+        mmap.update_value(0, foo.to_bytes().as_slice()).unwrap();
+
+        // read slots & values
+        let slot = mmap.get_slot(&0).unwrap();
+        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.length, 128);
+        let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
+        assert_eq!(actual, foo);
+    }
+
+    #[test]
+    fn test_update_larger_from_placeholder() {
+        let file = Builder::new()
+            .prefix("test-pages")
+            .suffix(".data")
+            .tempfile()
+            .unwrap();
+        let path = file.path();
+
+        let mut mmap = SlottedPageMmap::new(path, SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES);
+        let values = mmap.all_values();
+        assert_eq!(values.len(), 0);
+
+        // push placeholder value
+        mmap.insert_placeholder_value().unwrap();
+        let values = mmap.all_values();
+        assert_eq!(values.len(), 1);
+        assert_eq!(mmap.get_value(&0), None);
+
+        let slot = mmap.get_slot(&0).unwrap();
+        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.length, 128);
+
+        // create random slice larger than the placeholder value
+        let mut rng = rand::thread_rng();
+        let large_value: Vec<u8> = (0..SlottedPageMmap::MIN_VALUE_SIZE_BYTES + 42)
+            .map(|_| rng.gen())
+            .collect();
+
+        // update value from placeholder
+        assert!(large_value.len() > SlottedPageMmap::MIN_VALUE_SIZE_BYTES);
+
+        // None because the new value is larger than the current value
+        // The caller must delete and create a new value
+        assert!(mmap.update_value(0, large_value.as_slice()).is_none());
     }
 }

@@ -20,9 +20,7 @@ New experimental storage for vector payloads using mmap.
 
 ## TODOs
 
-- [ ] test update from placeholder
-- [ ] test update with larger data not fitting
-- [ ] test update with smaller data fitting
+- [ ] test update with larger data not fitting page
 - [ ] persist page tracker (as a flat vector)
 - [ ] load payload_storage from disk
 - [ ] how to handle very large payloads?

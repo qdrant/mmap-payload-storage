@@ -136,13 +136,27 @@ impl PayloadStorage {
 
         if let Some(PagePointer { page_id, slot_id }) = self.get_mapping(point_offset).copied() {
             let page = self.pages.get_mut(&page_id).unwrap();
-            let updated = page.write().update_value(slot_id, &comp_payload);
+            let mut page_guard = page.write();
+            let updated = page_guard.update_value(slot_id, &comp_payload);
             if updated.is_none() {
-                todo!("handle update in a new page")
-                // TODO handle update in a new page
-                // delete value from old page
+                // delete slot
+                page_guard.delete_value(slot_id);
+                drop(page_guard);
+
                 // find a new page (or create a new one if all full)
-                // insert value in new page
+                let new_page_id = self
+                    .find_best_fitting_page(payload_size)
+                    .unwrap_or_else(|| {
+                        // create a new page
+                        self.create_new_page()
+                    });
+                let mut page = self.pages.get_mut(&new_page_id).unwrap().write();
+                let new_slot_id = page.insert_value(&comp_payload).unwrap();
+                // update page_tracker
+                self.page_tracker[point_offset as usize] = Some(PagePointer {
+                    page_id: new_page_id,
+                    slot_id: new_slot_id,
+                });
             }
         } else {
             // this is a new payload
@@ -199,7 +213,7 @@ mod tests {
         let len = rng.gen_range(1..10);
         let mut word = String::with_capacity(len);
         for _ in 0..len {
-            word.push(rng.gen_range(b'a'..b'z') as char);
+            word.push(rng.gen_range(b'a'..=b'z') as char);
         }
         word
     }
@@ -367,5 +381,68 @@ mod tests {
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
         assert_eq!(stored_payload.unwrap(), updated_payload);
+    }
+
+    enum Operation {
+        Put(PointOffset, Payload),
+        Delete(PointOffset),
+        Update(PointOffset, Payload),
+    }
+
+    impl Operation {
+        fn random(rng: &mut impl Rng, max_point_offset: u32) -> Self {
+            let point_offset = rng.gen_range(0..=max_point_offset);
+            let operation = rng.gen_range(0..3);
+            match operation {
+                0 => {
+                    let payload = one_random_payload_please(rng, 2);
+                    Operation::Put(point_offset, payload)
+                }
+                1 => Operation::Delete(point_offset),
+                2 => {
+                    let payload = one_random_payload_please(rng, 2);
+                    Operation::Update(point_offset, payload)
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_behave_like_hashmap() {
+        let (_dir, mut storage) = empty_storage();
+
+        let rng = &mut rand::thread_rng();
+        let max_point_offset = 100000u32;
+
+        let mut model_hashmap = HashMap::new();
+
+        let operations = (0..1000u32)
+            .map(|_| Operation::random(rng, max_point_offset))
+            .collect::<Vec<_>>();
+
+        for operation in operations.iter() {
+            match operation {
+                Operation::Put(point_offset, payload) => {
+                    storage.put_payload(*point_offset, payload.clone());
+                    model_hashmap.insert(*point_offset, payload.clone());
+                }
+                Operation::Delete(point_offset) => {
+                    storage.delete_payload(*point_offset);
+                    model_hashmap.remove(point_offset);
+                }
+                Operation::Update(point_offset, payload) => {
+                    storage.put_payload(*point_offset, payload.clone());
+                    model_hashmap.insert(*point_offset, payload.clone());
+                }
+            }
+
+            // validate storage and model_hashmap are the same
+            for point_offset in 0..=max_point_offset {
+                let stored_payload = storage.get_payload(point_offset);
+                let model_payload = model_hashmap.get(&point_offset);
+                assert_eq!(stored_payload.as_ref(), model_payload);
+            }
+        }
     }
 }
