@@ -4,7 +4,8 @@ New experimental storage for vector payloads using mmap.
 
 ## Design
 
-- The storage is divided into pages of fixed size (32MB)
+- The storage is divided into pages of fixed minimum size (32MB), but can be larger if a single payload needs more space.
+- Each payload fits within a single page.
 - Those pages are mapped into memory using mmap
 - Those pages are following the Slotted Page structure
 - Slots are fixed size.
@@ -23,5 +24,4 @@ New experimental storage for vector payloads using mmap.
 - [ ] test update with larger data not fitting page
 - [ ] persist page tracker (as a flat vector)
 - [ ] load payload_storage from disk
-- [ ] how to handle very large payloads?
 - [ ] optimize to decrease fragmentation
