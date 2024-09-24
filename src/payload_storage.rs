@@ -133,7 +133,7 @@ impl PayloadStorage {
             let page = self.pages.get_mut(&page_id).unwrap();
             let mut page_guard = page.write();
             let updated = page_guard.update_value(slot_id, &comp_payload);
-            if updated.is_none() {
+            if !updated {
                 // delete slot
                 page_guard.delete_value(slot_id);
                 drop(page_guard);

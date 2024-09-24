@@ -41,7 +41,7 @@ impl SlottedPageHeader {
 pub struct SlotHeader {
     offset: u64,      // offset in the page (8 bytes)
     length: u64,      // length of the value (8 bytes)
-    left_padding: u8, // padding within the value for small values (1 byte)
+    right_padding: u8, // padding within the value for small values (1 byte)
     deleted: bool,    // whether the value has been deleted (1 byte)
     _align: [u8; 6],  // 6 bytes padding for alignment
 }
@@ -52,7 +52,7 @@ impl SlotHeader {
         // 24 // 8 + 8 + 1 + 1 + 6 padding
     }
 
-    fn new(offset: u64, length: u64, left_padding: u8, deleted: bool) -> SlotHeader {
+    fn new(offset: u64, length: u64, right_padding: u8, deleted: bool) -> SlotHeader {
         assert!(
             length >= SlottedPageMmap::MIN_VALUE_SIZE_BYTES as u64,
             "Value too small"
@@ -60,7 +60,7 @@ impl SlotHeader {
         SlotHeader {
             offset,
             length,
-            left_padding,
+            right_padding,
             deleted,
             _align: [0; 6],
         }
@@ -196,7 +196,7 @@ impl SlottedPageMmap {
         let end = start
             .checked_add(slot.length)
             .expect("start + length should not overflow")
-            - slot.left_padding as u64;
+            - slot.right_padding as u64;
 
         let value = &self.mmap[start as usize..end as usize];
         if value == SlottedPageMmap::PLACEHOLDER_VALUE {
@@ -319,43 +319,50 @@ impl SlottedPageMmap {
     /// The new value must have a size equal or less than the current value.
     ///
     /// Returns
-    /// - None if the slot_id is out of bounds or the new value is larger than the current value (caller needs a new page)
-    /// - Some(()) if the value was successfully updated
-    pub fn update_value(&mut self, slot_id: SlotId, new_value: &[u8]) -> Option<()> {
+    /// - false if the slot_id is out of bounds or the new value is larger than the current value (caller needs a new page)
+    /// - true if the value was successfully updated
+    pub fn update_value(&mut self, slot_id: SlotId, new_value: &[u8]) -> bool {
         let slot_count = self.header.slot_count;
         if slot_id as u64 >= slot_count {
-            return None;
+            return false;
         }
 
-        let slot = self.get_slot(&slot_id)?;
+        let Some(slot) = self.get_slot(&slot_id) else {
+            return false;
+        };
 
-        let real_value_size = new_value.len();
         // check if there is enough space for the new value
+        let real_value_size = new_value.len();
         if real_value_size > slot.length as usize {
-            return None;
+            return false;
         }
 
         // update value region
         let value_start = slot.offset as usize;
         let value_end = value_start + real_value_size;
         self.mmap[value_start..value_end].copy_from_slice(new_value);
-        let left_padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
-        if left_padding > 0 {
-            self.mmap[value_end..value_end + left_padding].copy_from_slice(&vec![0; left_padding]);
+        
+        let right_padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
+        let padding_start = value_end;
+        let padding_end = padding_start + right_padding;
+        if right_padding > 0 {
+            self.mmap[padding_start..padding_end].copy_from_slice(&vec![0; right_padding]);
         }
 
         // update slot
         // actual value size accounting for the minimum value size
-        let value_len = real_value_size + left_padding;
+        let value_len = real_value_size + right_padding;
         let update_slot = SlotHeader::new(
             value_start as u64, // new offset value
             value_len as u64,   // new value size
-            left_padding as u8, // new padding
-            true,               // mark as non deleted
+            right_padding as u8,        // new padding
+            false,             // mark as non deleted
         );
+        // When the new value is smaller than the previous one, it will create unused space in the data region.
+        // However, this will be solved when compacting.
         self.write_slot(slot_id, update_slot);
 
-        Some(())
+        true
     }
 
     // TODO
@@ -617,7 +624,8 @@ mod tests {
 
         // update value
         let new_foo = Foo { bar: 2, qux: false };
-        mmap.update_value(0, new_foo.to_bytes().as_slice()).unwrap();
+        let updated = mmap.update_value(0, new_foo.to_bytes().as_slice());
+        assert!(updated);
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
@@ -650,7 +658,8 @@ mod tests {
 
         // update value from placeholder
         let foo = Foo { bar: 1, qux: true };
-        mmap.update_value(0, foo.to_bytes().as_slice()).unwrap();
+        let updated = mmap.update_value(0, foo.to_bytes().as_slice());
+        assert!(updated);
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
@@ -694,6 +703,6 @@ mod tests {
 
         // None because the new value is larger than the current value
         // The caller must delete and create a new value
-        assert!(mmap.update_value(0, large_value.as_slice()).is_none());
+        assert!(!mmap.update_value(0, large_value.as_slice()));
     }
 }
