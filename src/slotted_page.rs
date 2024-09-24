@@ -16,31 +16,24 @@ struct SlottedPageHeader {
     /// The offset within the page where the data starts
     data_start_offset: u64,
 
-    /// 7 bytes padding for alignment
-    _align: [u8; 7],
-
-    /// The page size in bytes is 2^page_size_exp. For 32MB page, page_size_exp = 25
-    page_size_exp: u8,
+    /// The page size in bytes. Typically 32MB (33,554,432 bytes)
+    page_size: u64,
 }
 
 impl SlottedPageHeader {
     fn new(required_size: usize) -> SlottedPageHeader {
-        let page_size_exp = cmp::max(SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES, required_size)
-            .next_power_of_two()
-            .trailing_zeros() as u8;
-
-        let page_size = 1 << page_size_exp;
+        let page_size = cmp::max(SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES, required_size)
+            .next_power_of_two() as u64;
 
         SlottedPageHeader {
             slot_count: 0,
             data_start_offset: page_size,
-            page_size_exp,
-            _align: [0; 7],
+            page_size,
         }
     }
 
     fn page_size(&self) -> usize {
-        1 << self.page_size_exp
+        self.page_size as usize
     }
 }
 
