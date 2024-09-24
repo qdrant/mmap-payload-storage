@@ -105,14 +105,13 @@ impl PayloadStorage {
         }
     }
 
-    /// Create a new page and return its id
-    fn create_new_page(&mut self) -> u32 {
+    /// Create a new page and return its id.
+    ///
+    /// `size_hint` is used to create larger pages if necessary.
+    fn create_new_page(&mut self, size_hint: Option<usize>) -> u32 {
         let new_page_id = self.max_page_id + 1;
         let path = self.page_path(new_page_id);
-        let was_created = self.add_page(
-            new_page_id,
-            SlottedPageMmap::new(&path, SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES),
-        );
+        let was_created = self.add_page(new_page_id, SlottedPageMmap::new(&path, size_hint));
 
         assert!(was_created);
 
@@ -126,10 +125,6 @@ impl PayloadStorage {
 
     /// Put a payload in the storage
     pub fn put_payload(&mut self, point_offset: PointOffset, payload: Payload) {
-        if self.pages.is_empty() {
-            self.create_new_page();
-        }
-
         let payload_bytes = payload.to_bytes();
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
@@ -138,7 +133,7 @@ impl PayloadStorage {
             let page = self.pages.get_mut(&page_id).unwrap();
             let mut page_guard = page.write();
             let updated = page_guard.update_value(slot_id, &comp_payload);
-            if updated.is_none() {
+            if !updated {
                 // delete slot
                 page_guard.delete_value(slot_id);
                 drop(page_guard);
@@ -148,7 +143,7 @@ impl PayloadStorage {
                     .find_best_fitting_page(payload_size)
                     .unwrap_or_else(|| {
                         // create a new page
-                        self.create_new_page()
+                        self.create_new_page(Some(payload_size))
                     });
                 let mut page = self.pages.get_mut(&new_page_id).unwrap().write();
                 let new_slot_id = page.insert_value(&comp_payload).unwrap();
@@ -164,7 +159,7 @@ impl PayloadStorage {
                 .find_best_fitting_page(payload_size)
                 .unwrap_or_else(|| {
                     // create a new page
-                    self.create_new_page()
+                    self.create_new_page(Some(payload_size))
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
@@ -444,5 +439,44 @@ mod tests {
                 assert_eq!(stored_payload.as_ref(), model_payload);
             }
         }
+    }
+
+    #[test]
+    fn test_put_huge_payload() {
+        let (_dir, mut storage) = empty_storage();
+
+        let mut payload = Payload::default();
+        payload
+            .0
+            .insert("key".to_string(), Value::String("value".to_string()));
+
+        let huge_payload_size = 1024 * 1024 * 50; // 50MB
+
+        let distr = Uniform::new('a', 'z');
+        let rng = rand::thread_rng();
+
+        let huge_value = Value::String(distr.sample_iter(rng).take(huge_payload_size).collect());
+        payload.0.insert("huge".to_string(), huge_value);
+
+        storage.put_payload(0, payload.clone());
+        assert_eq!(storage.pages.len(), 1);
+
+        let page_mapping = storage.get_mapping(0).unwrap();
+        assert_eq!(page_mapping.page_id, 1); // first page
+        assert_eq!(page_mapping.slot_id, 0); // first slot
+
+        let stored_payload = storage.get_payload(0);
+        assert!(stored_payload.is_some());
+        assert_eq!(stored_payload.unwrap(), payload);
+
+        let page = storage.pages.get(&1).unwrap();
+
+        // the fitting page should be 64MB, so we should still have about 14MB of free space
+        let free_space = page.read().free_space();
+        assert!(
+            free_space > 1024 * 1024 * 13 && free_space < 1024 * 1024 * 15,
+            "free space should be around 14MB, but it is: {}",
+            free_space
+        );
     }
 }
