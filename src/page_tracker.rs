@@ -39,9 +39,11 @@ impl PageTracker {
     const DEFAULT_SIZE: usize = 1024 * 1024; // 1MB
 
     /// Create a new PageTracker at the given dir path
-    pub fn new(path: &Path) -> Self {
+    /// The file is created with the default size if no size hint is given
+    pub fn new(path: &Path, size_hint: Option<usize>) -> Self {
         let path = path.join(Self::FILE_NAME);
-        create_and_ensure_length(&path, Self::DEFAULT_SIZE).unwrap();
+        let size = size_hint.unwrap_or(Self::DEFAULT_SIZE);
+        create_and_ensure_length(&path, size).unwrap();
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header = PageTrackerHeader::default();
         let mut page_tracker = Self {
@@ -81,6 +83,11 @@ impl PageTracker {
         })
     }
 
+    /// Return the size of the underlying mmaped file
+    pub fn mmap_file_size(&self) -> usize {
+        self.mmap.len()
+    }
+
     pub fn all_page_ids(&self) -> HashSet<PageId> {
         self.mapping
             .iter()
@@ -98,6 +105,7 @@ impl PageTracker {
     }
 
     /// Save the mapping at the given offset
+    /// The file is resized if necessary
     fn save_mapping_at(&mut self, offset: usize) {
         let start = size_of::<PageTrackerHeader>() + offset * size_of::<Option<PagePointer>>();
         // check if file is long enough
@@ -136,12 +144,14 @@ impl PageTracker {
         self.mapping.get(point_offset as usize)
     }
 
+    /// Get the page pointer at the given point offset
     pub fn get(&self, point_offset: u32) -> Option<&PagePointer> {
         self.mapping
             .get(point_offset as usize)
             .and_then(|x| x.as_ref())
     }
 
+    /// Increment the header count if the given point offset is larger than the current count
     fn increment_header_count(&mut self, point_offset: PointOffset) {
         if point_offset >= self.header.count {
             self.header.count = point_offset + 1;
@@ -176,7 +186,7 @@ impl PageTracker {
         self.mapping.resize_with(new_len, || None);
     }
 
-    pub fn ensure_length(&mut self, new_len: usize) {
+    fn ensure_length(&mut self, new_len: usize) {
         if self.mapping.len() < new_len {
             self.resize(new_len);
         }
@@ -192,7 +202,7 @@ mod tests {
     fn test_new_tracker() {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let tracker = PageTracker::new(path);
+        let tracker = PageTracker::new(path, None);
         assert!(tracker.is_empty());
         assert_eq!(tracker.raw_mapping_len(), 0);
         assert_eq!(tracker.mapping_len(), 0);
@@ -204,7 +214,7 @@ mod tests {
     fn test_mapping_len_tracker() {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let mut tracker = PageTracker::new(path);
+        let mut tracker = PageTracker::new(path, None);
         assert!(tracker.is_empty());
         tracker.set(0, PagePointer::new(1, 1));
 
@@ -221,7 +231,7 @@ mod tests {
     fn test_set_get_clear_tracker() {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let mut tracker = PageTracker::new(path);
+        let mut tracker = PageTracker::new(path, None);
         tracker.set(0, PagePointer::new(1, 1));
         tracker.set(1, PagePointer::new(2, 2));
         tracker.set(2, PagePointer::new(3, 3));
@@ -263,7 +273,7 @@ mod tests {
 
         let value_count: usize = 1000;
 
-        let mut tracker = PageTracker::new(path);
+        let mut tracker = PageTracker::new(path, None);
 
         for i in 0..value_count {
             // save only half of the values
@@ -296,5 +306,23 @@ mod tests {
                 assert_eq!(tracker.get(i as u32), None);
             }
         }
+    }
+
+    #[test]
+    fn test_page_tracker_resize() {
+        let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
+        let path = file.path();
+
+        // create a tracker with a tiny size to force a resize
+        let small_size = 10;
+        let mut tracker = PageTracker::new(path, Some(small_size));
+        assert_eq!(tracker.mapping_len(), 0);
+        assert_eq!(tracker.mmap_file_size(), small_size);
+
+        for i in 0..100000 {
+            tracker.set(i as u32, PagePointer::new(i as u32, i as u32));
+        }
+        assert_eq!(tracker.mapping_len(), 100000);
+        assert!(tracker.mmap_file_size() > small_size);
     }
 }

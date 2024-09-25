@@ -27,7 +27,7 @@ impl PayloadStorage {
 
     pub fn new(path: PathBuf) -> Self {
         Self {
-            page_tracker: PageTracker::new(&path),
+            page_tracker: PageTracker::new(&path, None),
             pages: HashMap::new(),
             max_page_id: 0,
             base_path: path,
@@ -181,8 +181,6 @@ impl PayloadStorage {
 
             let page = self.pages.get_mut(&page_id).unwrap();
             let slot_id = page.write().insert_value(&comp_payload).unwrap();
-            // ensure page_tracker is long enough
-            self.page_tracker.ensure_length(point_offset as usize + 1);
             // update page_tracker
             self.page_tracker
                 .set(point_offset, PagePointer::new(page_id, slot_id));

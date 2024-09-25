@@ -22,3 +22,4 @@ New experimental storage for vector payloads using mmap.
 ## TODOs
 
 - [ ] compaction to decrease fragmentation
+- [ ] benchmarking with realistic data payload
