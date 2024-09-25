@@ -156,13 +156,17 @@ impl SlottedPageMmap {
     }
 
     /// Open an existing page at the given path
-    pub fn open(path: &Path) -> SlottedPageMmap {
+    /// If the file does not exist, return None
+    pub fn open(path: &Path) -> Option<SlottedPageMmap> {
+        if !path.exists() {
+            return None;
+        }
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header: &SlottedPageHeader =
             transmute_from_u8(&mmap[0..size_of::<SlottedPageHeader>()]);
         let header = header.clone();
         let path = path.to_path_buf();
-        SlottedPageMmap { path, header, mmap }
+        Some(SlottedPageMmap { path, header, mmap })
     }
 
     /// Get value associated with the slot id.
@@ -426,7 +430,7 @@ mod tests {
         drop(mmap);
 
         // reopen
-        let mmap = SlottedPageMmap::open(path);
+        let mmap = SlottedPageMmap::open(path).unwrap();
         assert_eq!(
             mmap.free_space(),
             SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES - size_of::<SlottedPageHeader>()
@@ -448,7 +452,7 @@ mod tests {
         let values = mmap.all_values();
         assert_eq!(values.len(), 0);
 
-        let mut mmap = SlottedPageMmap::open(path);
+        let mut mmap = SlottedPageMmap::open(path).unwrap();
 
         let mut free_space = mmap.free_space();
         // add placeholder values
@@ -468,7 +472,7 @@ mod tests {
 
         // drop and reopen
         drop(mmap);
-        let mmap = SlottedPageMmap::open(path);
+        let mmap = SlottedPageMmap::open(path).unwrap();
         assert_eq!(mmap.header.slot_count, expected_slot_count);
         assert_eq!(mmap.header.data_start_offset, 5_298_176);
 

@@ -21,7 +21,5 @@ New experimental storage for vector payloads using mmap.
 
 ## TODOs
 
-- [ ] test update with larger data not fitting page
-- [ ] persist page tracker (as a flat vector)
-- [ ] load payload_storage from disk
-- [ ] optimize to decrease fragmentation
+- [ ] compaction to decrease fragmentation
+- [ ] benchmarking with realistic data payload
