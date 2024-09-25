@@ -39,11 +39,11 @@ impl SlottedPageHeader {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlotHeader {
-    offset: u64,      // offset in the page (8 bytes)
-    length: u64,      // length of the value (8 bytes)
+    offset: u64,       // offset in the page (8 bytes)
+    length: u64,       // length of the value (8 bytes)
     right_padding: u8, // padding within the value for small values (1 byte)
-    deleted: bool,    // whether the value has been deleted (1 byte)
-    _align: [u8; 6],  // 6 bytes padding for alignment
+    deleted: bool,     // whether the value has been deleted (1 byte)
+    _align: [u8; 6],   // 6 bytes padding for alignment
 }
 
 impl SlotHeader {
@@ -341,7 +341,7 @@ impl SlottedPageMmap {
         let value_start = slot.offset as usize;
         let value_end = value_start + real_value_size;
         self.mmap[value_start..value_end].copy_from_slice(new_value);
-        
+
         let right_padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
         let padding_start = value_end;
         let padding_end = padding_start + right_padding;
@@ -353,10 +353,10 @@ impl SlottedPageMmap {
         // actual value size accounting for the minimum value size
         let value_len = real_value_size + right_padding;
         let update_slot = SlotHeader::new(
-            value_start as u64, // new offset value
-            value_len as u64,   // new value size
-            right_padding as u8,        // new padding
-            false,             // mark as non deleted
+            value_start as u64,  // new offset value
+            value_len as u64,    // new value size
+            right_padding as u8, // new padding
+            false,               // mark as non deleted
         );
         // When the new value is smaller than the previous one, it will create unused space in the data region.
         // However, this will be solved when compacting.
