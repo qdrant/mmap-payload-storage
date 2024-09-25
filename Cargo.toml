@@ -13,3 +13,10 @@ tempfile = "3.12.0"
 serde_cbor = "0.11.2"
 lz4_flex = { version = "0.11", default-features = false }
 rand = "0.8.5"
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "storage_bench"
+harness = false

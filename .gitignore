@@ -22,3 +22,8 @@ Cargo.lock
 
 mutants.out/
 mutants.out.old/
+
+# perf
+perf.data
+perf.data.old
+flamegraph.svg
