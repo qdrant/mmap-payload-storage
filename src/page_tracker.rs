@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 pub type PointOffset = u32;
 pub type PageId = u32;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PagePointer {
     pub page_id: PageId,
     pub slot_id: SlotId,
@@ -38,7 +38,7 @@ impl PageTracker {
     const FILE_NAME: &'static str = "page_tracker.dat";
     const DEFAULT_SIZE: usize = 1024 * 1024; // 1MB
 
-    /// Create a new PageTracker at the given path
+    /// Create a new PageTracker at the given dir path
     pub fn new(path: &Path) -> Self {
         let path = path.join(Self::FILE_NAME);
         create_and_ensure_length(&path, Self::DEFAULT_SIZE).unwrap();
@@ -88,7 +88,7 @@ impl PageTracker {
             .collect()
     }
 
-    pub fn header_len(&self) -> u32 {
+    pub fn header_count(&self) -> u32 {
         self.header.count
     }
 
@@ -129,8 +129,17 @@ impl PageTracker {
         self.mapping.iter().filter(|x| x.is_some()).count()
     }
 
-    pub fn get(&self, point_offset: u32) -> Option<&Option<PagePointer>> {
+    /// Get the raw value at the given point offset
+    /// For testing purposes
+    #[cfg(test)]
+    fn get_raw(&self, point_offset: u32) -> Option<&Option<PagePointer>> {
         self.mapping.get(point_offset as usize)
+    }
+
+    pub fn get(&self, point_offset: u32) -> Option<&PagePointer> {
+        self.mapping
+            .get(point_offset as usize)
+            .and_then(|x| x.as_ref())
     }
 
     fn increment_header_count(&mut self, point_offset: PointOffset) {
@@ -170,6 +179,122 @@ impl PageTracker {
     pub fn ensure_length(&mut self, new_len: usize) {
         if self.mapping.len() < new_len {
             self.resize(new_len);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::page_tracker::{PagePointer, PageTracker};
+    use tempfile::Builder;
+
+    #[test]
+    fn test_new_tracker() {
+        let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
+        let path = file.path();
+        let tracker = PageTracker::new(path);
+        assert!(tracker.is_empty());
+        assert_eq!(tracker.raw_mapping_len(), 0);
+        assert_eq!(tracker.mapping_len(), 0);
+        assert_eq!(tracker.header_count(), 0);
+        assert_eq!(tracker.all_page_ids().len(), 0);
+    }
+
+    #[test]
+    fn test_mapping_len_tracker() {
+        let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
+        let path = file.path();
+        let mut tracker = PageTracker::new(path);
+        assert!(tracker.is_empty());
+        tracker.set(0, PagePointer::new(1, 1));
+
+        assert!(!tracker.is_empty());
+        assert_eq!(tracker.raw_mapping_len(), 1);
+        assert_eq!(tracker.mapping_len(), 1);
+
+        tracker.set(100, PagePointer::new(2, 2));
+        assert_eq!(tracker.raw_mapping_len(), 101);
+        assert_eq!(tracker.mapping_len(), 2);
+    }
+
+    #[test]
+    fn test_set_get_clear_tracker() {
+        let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
+        let path = file.path();
+        let mut tracker = PageTracker::new(path);
+        tracker.set(0, PagePointer::new(1, 1));
+        tracker.set(1, PagePointer::new(2, 2));
+        tracker.set(2, PagePointer::new(3, 3));
+        tracker.set(10, PagePointer::new(10, 10));
+
+        assert!(!tracker.is_empty());
+        assert_eq!(tracker.mapping_len(), 4);
+        assert_eq!(tracker.raw_mapping_len(), 11); // accounts for empty slots
+        assert_eq!(tracker.header_count(), 11);
+
+        assert_eq!(tracker.get_raw(0), Some(&Some(PagePointer::new(1, 1))));
+        assert_eq!(tracker.get_raw(1), Some(&Some(PagePointer::new(2, 2))));
+        assert_eq!(tracker.get_raw(2), Some(&Some(PagePointer::new(3, 3))));
+        assert_eq!(tracker.get_raw(3), Some(&None)); // intermediate empty slot
+        assert_eq!(tracker.get_raw(10), Some(&Some(PagePointer::new(10, 10))));
+        assert_eq!(tracker.get_raw(1000), None); // out of bounds
+
+        tracker.clear_mapping(1);
+        // the value has been cleared but the entry is still there
+        assert_eq!(tracker.get_raw(1), Some(&None));
+        assert_eq!(tracker.get(1), None);
+
+        assert_eq!(tracker.mapping_len(), 3);
+        assert_eq!(tracker.raw_mapping_len(), 11);
+        assert_eq!(tracker.header_count(), 11);
+
+        // overwrite some values
+        tracker.set(0, PagePointer::new(10, 10));
+        tracker.set(2, PagePointer::new(30, 30));
+
+        assert_eq!(tracker.get(0), Some(&PagePointer::new(10, 10)));
+        assert_eq!(tracker.get(2), Some(&PagePointer::new(30, 30)));
+    }
+
+    #[test]
+    fn test_persist_and_open_tracker() {
+        let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
+        let path = file.path();
+
+        let value_count: usize = 1000;
+
+        let mut tracker = PageTracker::new(path);
+
+        for i in 0..value_count {
+            // save only half of the values
+            if i % 2 == 0 {
+                tracker.set(i as u32, PagePointer::new(i as u32, i as u32));
+            }
+        }
+
+        assert_eq!(tracker.mapping_len(), value_count / 2);
+        assert_eq!(tracker.raw_mapping_len(), value_count - 1);
+        assert_eq!(tracker.header_count(), value_count as u32 - 1);
+
+        // drop the tracker
+        drop(tracker);
+
+        // reopen the tracker
+        let tracker = PageTracker::open(path).unwrap();
+        assert_eq!(tracker.mapping_len(), value_count / 2);
+        assert_eq!(tracker.raw_mapping_len(), value_count - 1);
+        assert_eq!(tracker.header_count(), value_count as u32 - 1);
+
+        // check the values
+        for i in 0..value_count {
+            if i % 2 == 0 {
+                assert_eq!(
+                    tracker.get(i as u32),
+                    Some(&PagePointer::new(i as u32, i as u32))
+                );
+            } else {
+                assert_eq!(tracker.get(i as u32), None);
+            }
         }
     }
 }

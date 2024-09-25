@@ -87,7 +87,7 @@ impl PayloadStorage {
 
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
-        let PagePointer { page_id, slot_id } = self.page_tracker.get(point_offset)?.as_ref()?;
+        let PagePointer { page_id, slot_id } = self.get_mapping(point_offset)?;
         let page = self.pages.get(page_id).expect("page not found");
         let page_guard = page.read();
         let raw = page_guard.get_value(slot_id)?;
@@ -139,7 +139,7 @@ impl PayloadStorage {
 
     /// Get the mapping for a given point offset
     fn get_mapping(&self, point_offset: PointOffset) -> Option<&PagePointer> {
-        self.page_tracker.get(point_offset)?.as_ref()
+        self.page_tracker.get(point_offset)
     }
 
     /// Put a payload in the storage
