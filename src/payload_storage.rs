@@ -3,6 +3,7 @@ use crate::payload::Payload;
 use crate::slotted_page::{SlotHeader, SlottedPageMmap};
 use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -166,7 +167,7 @@ impl PayloadStorage {
                         self.create_new_page(Some(payload_size))
                     });
                 let mut page = self.pages.get_mut(&new_page_id).unwrap().write();
-                let new_slot_id = page.insert_value(&comp_payload).unwrap();
+                let new_slot_id = page.insert_value(point_offset, &comp_payload).unwrap();
                 // update page_tracker
                 self.page_tracker
                     .set(point_offset, PagePointer::new(new_page_id, new_slot_id));
@@ -181,7 +182,12 @@ impl PayloadStorage {
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
-            let slot_id = page.write().insert_value(&comp_payload).unwrap();
+
+            let slot_id = page
+                .write()
+                .insert_value(point_offset, &comp_payload)
+                .unwrap();
+            
             // update page_tracker
             self.page_tracker
                 .set(point_offset, PagePointer::new(page_id, slot_id));
@@ -198,6 +204,117 @@ impl PayloadStorage {
         // delete mapping
         self.page_tracker.unset(point_offset);
         Some(())
+    }
+
+    /// Page ids with amount of fragmentation, ordered by most to least fragmentation
+    fn pages_to_defrag(&self) -> Vec<(u32, usize)> {
+        let mut fragmentation = self
+            .pages
+            .iter()
+            .filter_map(|(page_id, page)| {
+                let page = page.read();
+                let frag_space = page.fragmented_space();
+
+                // check if we should defrag this page
+                let frag_threshold =
+                    SlottedPageMmap::FRAGMENTATION_THRESHOLD_RATIO * page.page_size() as f32;
+                if frag_space < frag_threshold.ceil() as usize {
+                    // page is not fragmented enough, skip
+                    return None;
+                }
+                Some((*page_id, frag_space))
+            })
+            .collect::<Vec<_>>();
+
+        // sort by most to least fragmented
+        fragmentation.sort_unstable_by_key(|(_, fragmented_space)| Reverse(*fragmented_space));
+
+        fragmentation
+    }
+
+    pub fn compact(&mut self) {
+        // find out which pages should be compacted
+        let pages_to_defrag = self.pages_to_defrag();
+
+        if pages_to_defrag.is_empty() {
+            return;
+        }
+
+        let mut pages_to_defrag = pages_to_defrag.into_iter();
+        let mut old_page_id = pages_to_defrag.next().unwrap().0;
+        let mut last_slot_id = 0;
+
+        // TODO: account for the fact that the first value could be larger than 32MB and the newly created page will
+        // immediately not be used? we don't want to create empty pages. But it is a quite rare case, so maybe we can just ignore it
+        let mut size_hint = None;
+
+        // This is a loop because we might need to create more pages if the current new page is full
+        'new_page: loop {
+            // create new page
+            let new_page_id = self.create_new_page(size_hint);
+
+            // go over each page to defrag
+            loop {
+                let mut new_page = self.pages.get(&new_page_id).unwrap().write();
+                let old_page = self.pages.get(&old_page_id).unwrap().read();
+
+                'slots: for (slot, value) in old_page.iter_slot_values_starting_from(last_slot_id) {
+                    let point_offset = slot.point_offset();
+
+                    if slot.deleted() {
+                        continue 'slots;
+                    }
+
+                    let was_inserted = if let Some(value) = value {
+                        new_page.insert_value(point_offset, value)
+                    } else {
+                        new_page.insert_placeholder_value(point_offset)
+                    };
+
+                    if was_inserted.is_none() {
+                        // new page is full, create a new one
+                        size_hint = value.map(|v| v.len());
+                        continue 'new_page;
+                    }
+
+                    let slot_id = was_inserted.expect("a value should always fit at this point");
+
+                    let new_pointer = PagePointer {
+                        page_id: new_page_id,
+                        slot_id,
+                    };
+
+                    // update page tracker
+                    self.page_tracker.set(point_offset, new_pointer);
+
+                    // prepare for next iteration
+                    last_slot_id += 1;
+                }
+                // drop read and write guards
+                drop(old_page);
+                drop(new_page);
+
+                // delete old page
+                let page_to_remove = self.pages.remove(&old_page_id).unwrap();
+                last_slot_id = 0;
+
+                // All points in this page have been updated to the new page in the page tracker,
+                // so there should not be any outstanding references to this page.
+                // TODO: audit this part
+                Arc::into_inner(page_to_remove)
+                    .unwrap()
+                    .into_inner()
+                    .drop_page();
+
+                match pages_to_defrag.next() {
+                    Some((page_id, _defrag_space)) => {
+                        old_page_id = page_id;
+                    }
+                    // No more pages to defrag, end compaction
+                    None => break 'new_page,
+                };
+            }
+        }
     }
 }
 
