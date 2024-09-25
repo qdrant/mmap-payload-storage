@@ -24,7 +24,7 @@ impl PagePointer {
 
 #[derive(Default, Clone)]
 struct PageTrackerHeader {
-    count: u32,
+    max_point_offset: u32,
 }
 
 pub struct PageTracker {
@@ -66,8 +66,8 @@ impl PageTracker {
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header: &PageTrackerHeader =
             transmute_from_u8(&mmap[0..size_of::<PageTrackerHeader>()]);
-        let mut mapping = Vec::with_capacity(header.count as usize);
-        for i in 0..header.count {
+        let mut mapping = Vec::with_capacity(header.max_point_offset as usize);
+        for i in 0..header.max_point_offset {
             let start_offset =
                 size_of::<PageTrackerHeader>() + i as usize * size_of::<Option<PagePointer>>();
             let end_offset = start_offset + size_of::<Option<PagePointer>>();
@@ -96,7 +96,7 @@ impl PageTracker {
     }
 
     pub fn header_count(&self) -> u32 {
-        self.header.count
+        self.header.max_point_offset
     }
 
     /// Write the current page header to the memory map
@@ -106,8 +106,9 @@ impl PageTracker {
 
     /// Save the mapping at the given offset
     /// The file is resized if necessary
-    fn save_mapping_at(&mut self, offset: usize) {
-        let start = size_of::<PageTrackerHeader>() + offset * size_of::<Option<PagePointer>>();
+    fn persist_pointer(&mut self, point_offset: usize) {
+        let start =
+            size_of::<PageTrackerHeader>() + point_offset * size_of::<Option<PagePointer>>();
         // check if file is long enough
         if self.mmap.len() < start + size_of::<Option<PagePointer>>() {
             // flush the current mmap
@@ -118,7 +119,7 @@ impl PageTracker {
             self.mmap = open_write_mmap(&self.path, AdviceSetting::from(Advice::Normal)).unwrap();
         }
         let end = start + size_of::<Option<PagePointer>>();
-        self.mmap[start..end].copy_from_slice(transmute_to_u8(&self.mapping[offset]));
+        self.mmap[start..end].copy_from_slice(transmute_to_u8(&self.mapping[point_offset]));
     }
 
     pub fn is_empty(&self) -> bool {
@@ -133,6 +134,7 @@ impl PageTracker {
 
     /// Get the length of the mapping
     /// Excludes None values
+    #[cfg(test)]
     pub fn mapping_len(&self) -> usize {
         self.mapping.iter().filter(|x| x.is_some()).count()
     }
@@ -152,9 +154,9 @@ impl PageTracker {
     }
 
     /// Increment the header count if the given point offset is larger than the current count
-    fn increment_header_count(&mut self, point_offset: PointOffset) {
-        if point_offset >= self.header.count {
-            self.header.count = point_offset + 1;
+    fn increment_max_point_offset(&mut self, point_offset: PointOffset) {
+        if point_offset >= self.header.max_point_offset {
+            self.header.max_point_offset = point_offset + 1;
             self.write_header();
         }
     }
@@ -164,31 +166,31 @@ impl PageTracker {
     pub fn set(&mut self, point_offset: u32, page_pointer: PagePointer) {
         let point_offset = point_offset as usize;
         // save in memory mapping vector
-        self.ensure_length(point_offset + 1);
+        self.ensure_mapping_length(point_offset + 1);
         self.mapping[point_offset] = Some(page_pointer);
         // save mapping to mmap
-        self.save_mapping_at(point_offset);
+        self.persist_pointer(point_offset);
         // increment header count if necessary
-        self.increment_header_count(point_offset as u32);
+        self.increment_max_point_offset(point_offset as u32);
     }
 
-    pub fn clear_mapping(&mut self, point_offset: u32) {
+    pub fn unset(&mut self, point_offset: u32) {
         let point_offset = point_offset as usize;
         if point_offset < self.mapping.len() {
             // clear in memory mapping vector
             self.mapping[point_offset] = None;
             // save mapping to mmap
-            self.save_mapping_at(point_offset);
+            self.persist_pointer(point_offset);
         }
     }
 
-    fn resize(&mut self, new_len: usize) {
+    fn resize_mapping(&mut self, new_len: usize) {
         self.mapping.resize_with(new_len, || None);
     }
 
-    fn ensure_length(&mut self, new_len: usize) {
+    fn ensure_mapping_length(&mut self, new_len: usize) {
         if self.mapping.len() < new_len {
-            self.resize(new_len);
+            self.resize_mapping(new_len);
         }
     }
 }
@@ -249,7 +251,7 @@ mod tests {
         assert_eq!(tracker.get_raw(10), Some(&Some(PagePointer::new(10, 10))));
         assert_eq!(tracker.get_raw(1000), None); // out of bounds
 
-        tracker.clear_mapping(1);
+        tracker.unset(1);
         // the value has been cleared but the entry is still there
         assert_eq!(tracker.get_raw(1), Some(&None));
         assert_eq!(tracker.get(1), None);

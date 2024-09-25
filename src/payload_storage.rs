@@ -44,20 +44,17 @@ impl PayloadStorage {
         let mut max_page_id: u32 = 0;
         for page_id in page_ids {
             let page_path = &path.join(format!("slotted-paged-{}.dat", page_id));
-            if let Some(slotted_page) = SlottedPageMmap::open(page_path) {
-                let page = Arc::new(RwLock::new(slotted_page));
-                pages.insert(page_id, page);
-                if page_id > max_page_id {
-                    max_page_id = page_id;
-                }
-            } else {
-                panic!("Page not found");
+            let slotted_page = SlottedPageMmap::open(page_path).expect("Page not found");
+            let page = Arc::new(RwLock::new(slotted_page));
+            pages.insert(page_id, page);
+            if page_id > max_page_id {
+                max_page_id = page_id;
             }
         }
         Some(Self {
             page_tracker,
             pages,
-            max_page_id: 0,
+            max_page_id,
             base_path: path,
         })
     }
@@ -87,7 +84,7 @@ impl PayloadStorage {
 
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
-        let PagePointer { page_id, slot_id } = self.get_mapping(point_offset)?;
+        let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
         let page = self.pages.get(page_id).expect("page not found");
         let page_guard = page.read();
         let raw = page_guard.get_value(slot_id)?;
@@ -138,7 +135,7 @@ impl PayloadStorage {
     }
 
     /// Get the mapping for a given point offset
-    fn get_mapping(&self, point_offset: PointOffset) -> Option<&PagePointer> {
+    fn get_pointer(&self, point_offset: PointOffset) -> Option<&PagePointer> {
         self.page_tracker.get(point_offset)
     }
 
@@ -148,7 +145,7 @@ impl PayloadStorage {
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
 
-        if let Some(PagePointer { page_id, slot_id }) = self.get_mapping(point_offset).copied() {
+        if let Some(PagePointer { page_id, slot_id }) = self.get_pointer(point_offset).copied() {
             let page = self.pages.get_mut(&page_id).unwrap();
             let mut page_guard = page.write();
             let updated = page_guard.update_value(slot_id, &comp_payload);
@@ -190,12 +187,12 @@ impl PayloadStorage {
     /// Delete a payload from the storage
     /// Returns None if the point_offset, page, or payload was not found
     pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<()> {
-        let PagePointer { page_id, slot_id } = self.get_mapping(point_offset).copied()?;
+        let PagePointer { page_id, slot_id } = self.get_pointer(point_offset).copied()?;
         let page = self.pages.get_mut(&page_id)?;
         // delete value from page
         page.write().delete_value(slot_id);
         // delete mapping
-        self.page_tracker.clear_mapping(point_offset);
+        self.page_tracker.unset(point_offset);
         Some(())
     }
 }
@@ -291,7 +288,7 @@ mod tests {
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
 
-        let page_mapping = storage.get_mapping(0).unwrap();
+        let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
         assert_eq!(page_mapping.slot_id, 0); // first slot
 
@@ -339,7 +336,7 @@ mod tests {
         storage.put_payload(0, payload.clone());
         assert_eq!(storage.pages.len(), 1);
 
-        let page_mapping = storage.get_mapping(0).unwrap();
+        let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
         assert_eq!(page_mapping.slot_id, 0); // first slot
 
@@ -369,7 +366,7 @@ mod tests {
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
 
-        let page_mapping = storage.get_mapping(0).unwrap();
+        let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
         assert_eq!(page_mapping.slot_id, 0); // first slot
 
@@ -426,7 +423,7 @@ mod tests {
 
         let mut model_hashmap = HashMap::new();
 
-        let operations = (0..10000u32)
+        let operations = (0..100000u32)
             .map(|_| Operation::random(rng, max_point_offset))
             .collect::<Vec<_>>();
 
@@ -500,7 +497,7 @@ mod tests {
         storage.put_payload(0, payload.clone());
         assert_eq!(storage.pages.len(), 1);
 
-        let page_mapping = storage.get_mapping(0).unwrap();
+        let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
         assert_eq!(page_mapping.slot_id, 0); // first slot
 
@@ -535,7 +532,7 @@ mod tests {
             storage.put_payload(0, payload.clone());
             assert_eq!(storage.pages.len(), 1);
 
-            let page_mapping = storage.get_mapping(0).unwrap();
+            let page_mapping = storage.get_pointer(0).unwrap();
             assert_eq!(page_mapping.page_id, 1); // first page
             assert_eq!(page_mapping.slot_id, 0); // first slot
 
