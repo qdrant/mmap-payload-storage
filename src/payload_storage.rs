@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct PayloadStorage {
-    page_tracker: PageTracker,
+    page_tracker: RwLock<PageTracker>,
     pages: HashMap<u32, Arc<RwLock<SlottedPageMmap>>>, // page_id -> mmap page
     max_page_id: u32,
     base_path: PathBuf,
@@ -28,7 +28,7 @@ impl PayloadStorage {
 
     pub fn new(path: PathBuf) -> Self {
         Self {
-            page_tracker: PageTracker::new(&path, None),
+            page_tracker: RwLock::new(PageTracker::new(&path, None)),
             pages: HashMap::new(),
             max_page_id: 0,
             base_path: path,
@@ -53,7 +53,7 @@ impl PayloadStorage {
             }
         }
         Some(Self {
-            page_tracker,
+            page_tracker: RwLock::new(page_tracker),
             pages,
             max_page_id,
             base_path: path,
@@ -61,7 +61,7 @@ impl PayloadStorage {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pages.is_empty() && self.page_tracker.is_empty()
+        self.pages.is_empty() && self.page_tracker.read().is_empty()
     }
 
     /// Get the path for a given page id
@@ -90,9 +90,9 @@ impl PayloadStorage {
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
         let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
-        let page = self.pages.get(page_id).expect("page not found");
+        let page = self.pages.get(&page_id).expect("page not found");
         let page_guard = page.read();
-        let raw = page_guard.get_value(slot_id)?;
+        let raw = page_guard.get_value(&slot_id)?;
         let decompressed = Self::decompress(raw);
         let payload = Payload::from_bytes(&decompressed);
         Some(payload)
@@ -140,8 +140,8 @@ impl PayloadStorage {
     }
 
     /// Get the mapping for a given point offset
-    fn get_pointer(&self, point_offset: PointOffset) -> Option<&PagePointer> {
-        self.page_tracker.get(point_offset)
+    fn get_pointer(&self, point_offset: PointOffset) -> Option<PagePointer> {
+        self.page_tracker.read().get(point_offset).copied()
     }
 
     /// Put a payload in the storage
@@ -150,7 +150,7 @@ impl PayloadStorage {
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
 
-        if let Some(PagePointer { page_id, slot_id }) = self.get_pointer(point_offset).copied() {
+        if let Some(PagePointer { page_id, slot_id }) = self.get_pointer(point_offset) {
             let page = self.pages.get_mut(&page_id).unwrap();
             let mut page_guard = page.write();
             let updated = page_guard.update_value(slot_id, &comp_payload);
@@ -170,6 +170,7 @@ impl PayloadStorage {
                 let new_slot_id = page.insert_value(point_offset, &comp_payload).unwrap();
                 // update page_tracker
                 self.page_tracker
+                    .write()
                     .set(point_offset, PagePointer::new(new_page_id, new_slot_id));
             }
         } else {
@@ -187,9 +188,10 @@ impl PayloadStorage {
                 .write()
                 .insert_value(point_offset, &comp_payload)
                 .unwrap();
-            
+
             // update page_tracker
             self.page_tracker
+                .write()
                 .set(point_offset, PagePointer::new(page_id, slot_id));
         }
     }
@@ -197,12 +199,12 @@ impl PayloadStorage {
     /// Delete a payload from the storage
     /// Returns None if the point_offset, page, or payload was not found
     pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<()> {
-        let PagePointer { page_id, slot_id } = self.get_pointer(point_offset).copied()?;
+        let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
         let page = self.pages.get_mut(&page_id)?;
         // delete value from page
         page.write().delete_value(slot_id);
         // delete mapping
-        self.page_tracker.unset(point_offset);
+        self.page_tracker.write().unset(point_offset);
         Some(())
     }
 
@@ -255,6 +257,9 @@ impl PayloadStorage {
 
             // go over each page to defrag
             loop {
+                // lock the tracker at this point, to prevent updates to the page tracker while we are defragging
+                let mut page_tracker = self.page_tracker.write();
+
                 let mut new_page = self.pages.get(&new_page_id).unwrap().write();
                 let old_page = self.pages.get(&old_page_id).unwrap().read();
 
@@ -285,7 +290,7 @@ impl PayloadStorage {
                     };
 
                     // update page tracker
-                    self.page_tracker.set(point_offset, new_pointer);
+                    page_tracker.set(point_offset, new_pointer);
 
                     // prepare for next iteration
                     last_slot_id += 1;
@@ -341,7 +346,7 @@ mod tests {
         let payload = Payload::default();
         storage.put_payload(0, payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.read().raw_mapping_len(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -359,7 +364,7 @@ mod tests {
 
         storage.put_payload(0, payload.clone());
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.read().raw_mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
@@ -437,7 +442,7 @@ mod tests {
 
         storage.put_payload(0, payload.clone());
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.read().raw_mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
@@ -455,7 +460,7 @@ mod tests {
 
         storage.put_payload(0, updated_payload.clone());
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.read().raw_mapping_len(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -519,7 +524,10 @@ mod tests {
         }
 
         // asset same length
-        assert_eq!(storage.page_tracker.mapping_len(), model_hashmap.len());
+        assert_eq!(
+            storage.page_tracker.read().mapping_len(),
+            model_hashmap.len()
+        );
 
         // validate storage and model_hashmap are the same
         for point_offset in 0..=max_point_offset {
@@ -535,7 +543,10 @@ mod tests {
         let storage = PayloadStorage::open(dir.path().to_path_buf()).unwrap();
 
         // asset same length
-        assert_eq!(storage.page_tracker.mapping_len(), model_hashmap.len());
+        assert_eq!(
+            storage.page_tracker.read().mapping_len(),
+            model_hashmap.len()
+        );
 
         // validate storage and model_hashmap are the same
         for point_offset in 0..=max_point_offset {
