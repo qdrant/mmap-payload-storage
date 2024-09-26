@@ -257,7 +257,7 @@ impl PayloadStorage {
 
             // go over each page to defrag
             loop {
-                // lock the tracker at this point, to prevent updates to the page tracker while we are defragging
+                // lock the tracker at this point, to prevent other processes from using the old pointer
                 let mut page_tracker = self.page_tracker.write();
 
                 let mut new_page = self.pages.get(&new_page_id).unwrap().write();
@@ -709,16 +709,16 @@ mod tests {
         // load data into storage
         let point_offset = write_data(&mut storage, 0);
         assert_eq!(point_offset, EXPECTED_LEN as u32);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN);
+        assert_eq!(storage.page_tracker.read().mapping_len(), EXPECTED_LEN);
+        assert_eq!(storage.page_tracker.read().raw_mapping_len(), EXPECTED_LEN);
         assert_eq!(storage.pages.len(), 2);
 
         // write the same payload a second time
         let point_offset = write_data(&mut storage, point_offset);
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 3);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.page_tracker.read().mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.page_tracker.read().raw_mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent
         storage_double_pass_is_consistent(&storage);
@@ -731,5 +731,61 @@ mod tests {
 
         // assert storage is consistent after reopening
         storage_double_pass_is_consistent(&storage);
+    }
+    
+    #[test]
+    fn test_compaction() {
+        let (_dir, mut storage) = empty_storage();
+
+        let rng = &mut rand::thread_rng();
+        let max_point_offset = 20000;
+
+        let large_payloads = (0..max_point_offset)
+            .map(|_| one_random_payload_please(rng, 10))
+            .collect::<Vec<_>>();
+        
+        for i in 0..max_point_offset {
+            storage.put_payload(i as u32, large_payloads[i].clone());
+        }
+        
+        // sanity check
+        for i in 0..max_point_offset {
+            let stored_payload = storage.get_payload(i as u32);
+            assert_eq!(stored_payload.as_ref(), Some(&large_payloads[i]));
+        }
+        
+        // check no fragmentation
+        for page in storage.pages.values() {
+            assert_eq!(page.read().fragmented_space(), 0);
+        }
+        
+        // update with smaller values
+        let small_payloads = (0..max_point_offset)
+            .map(|_| one_random_payload_please(rng, 1))
+            .collect::<Vec<_>>();
+        for i in 0..max_point_offset {
+            storage.put_payload(i as u32, small_payloads[i].clone());
+        }
+        
+        // sanity check
+        for i in 0..max_point_offset {
+            let stored_payload = storage.get_payload(i as u32);
+            assert_eq!(stored_payload.as_ref(), Some(&small_payloads[i]));
+        }
+        
+        // check fragmentation
+        assert!(!storage.pages_to_defrag().is_empty());
+        
+        // compaction
+        storage.compact();
+        
+        // check consistency
+        for i in 0..max_point_offset {
+            let stored_payload = storage.get_payload(i as u32);
+            assert_eq!(stored_payload.as_ref(), Some(&small_payloads[i]));
+        }
+        
+        // check no outstanding fragmentation
+        assert!(storage.pages_to_defrag().is_empty());
     }
 }

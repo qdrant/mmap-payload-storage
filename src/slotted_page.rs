@@ -277,7 +277,7 @@ impl SlottedPageMmap {
         let mut fragmented_space = 0;
 
         let mut slot_id = 0;
-        let mut last_offset = 0u64;
+        let mut last_offset = self.page_size() as u64;
         while let Some(slot) = self.get_slot_ref(&slot_id) {
             // if the slot is deleted, we can consider it empty space
             if slot.deleted {
