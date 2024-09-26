@@ -826,7 +826,7 @@ mod tests {
         let small_payloads = (0..max_point_offset)
             .map(|_| one_random_payload_please(rng, 1))
             .collect::<Vec<_>>();
-        
+
         for (i, payload) in small_payloads.iter().enumerate() {
             storage.put_payload(i as u32, payload.clone());
         }
