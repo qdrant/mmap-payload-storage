@@ -111,6 +111,7 @@ impl SlottedPageMmap {
     }
 
     /// Return all values in the page with placeholder or deleted values as `None`
+    #[cfg(test)]
     pub fn all_values(&self) -> Vec<Option<&[u8]>> {
         self.iter_slot_values_starting_from(0)
             .map(|(_, value)| value)
@@ -141,6 +142,7 @@ impl SlottedPageMmap {
     }
 
     /// Returns all non deleted values in the page. `None` values means that the slot is a placeholder
+    #[cfg(test)]
     fn non_deleted_values(&self) -> Vec<&[u8]> {
         let mut values = Vec::new();
         for i in 0..self.header.slot_count {
@@ -242,6 +244,7 @@ impl SlottedPageMmap {
     }
 
     /// Check if there is enough space for a new slot + min value
+    #[cfg(test)]
     fn has_capacity_for_min_value(&self) -> bool {
         self.free_space()
             .saturating_sub(SlotHeader::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES)
@@ -432,7 +435,7 @@ impl SlottedPageMmap {
     }
 
     /// Delete the page from the filesystem.
-    pub fn drop_page(self) {
+    pub fn delete_page(self) {
         drop(self.mmap);
         std::fs::remove_file(&self.path).unwrap();
     }

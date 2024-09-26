@@ -1,10 +1,11 @@
-use crate::page_tracker::{PagePointer, PageTracker, PointOffset};
+use crate::page_tracker::{PageId, PagePointer, PageTracker, PointOffset};
 use crate::payload::Payload;
-use crate::slotted_page::{SlotHeader, SlottedPageMmap};
+use crate::slotted_page::{SlotHeader, SlotId, SlottedPageMmap};
 use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -37,7 +38,7 @@ impl PayloadStorage {
 
     /// Open an existing PayloadStorage at the given path
     /// Returns None if the storage does not exist
-    fn open(path: PathBuf) -> Option<Self> {
+    pub fn open(path: PathBuf) -> Option<Self> {
         let page_tracker = PageTracker::open(&path)?;
         let page_ids = page_tracker.all_page_ids();
         // load pages
@@ -90,7 +91,7 @@ impl PayloadStorage {
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
         let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
-        let page = self.pages.get(&page_id).expect("page not found");
+        let page = self.pages.get(&page_id)?;
         let page_guard = page.read();
         let raw = page_guard.get_value(&slot_id)?;
         let decompressed = Self::decompress(raw);
@@ -234,12 +235,13 @@ impl PayloadStorage {
         fragmentation
     }
 
-    pub fn compact(&mut self) {
+    /// Compact the storage by defragmenting pages into new ones. Returns true if at least one page was defragmented.
+    pub fn compact(&mut self) -> bool {
         // find out which pages should be compacted
         let pages_to_defrag = self.pages_to_defrag();
 
         if pages_to_defrag.is_empty() {
-            return;
+            return false;
         }
 
         let mut pages_to_defrag = pages_to_defrag.into_iter();
@@ -253,55 +255,40 @@ impl PayloadStorage {
         // This is a loop because we might need to create more pages if the current new page is full
         'new_page: loop {
             // create new page
-            let new_page_id = self.create_new_page(size_hint);
+            let new_page_id = {
+                let this = &mut *self;
+                let new_page_id = this.max_page_id + 1;
+                let path = this.page_path(new_page_id);
+                let was_created =
+                    this.add_page(new_page_id, SlottedPageMmap::new(&path, size_hint));
+
+                assert!(was_created);
+
+                new_page_id
+            };
 
             // go over each page to defrag
             loop {
-                // lock the tracker at this point, to prevent other processes from using the old pointer
+                // lock the tracker at this point, to prevent other threads from waiting on the old page
                 let mut page_tracker = self.page_tracker.write();
 
-                let mut new_page = self.pages.get(&new_page_id).unwrap().write();
-                let old_page = self.pages.get(&old_page_id).unwrap().read();
-
-                'slots: for (slot, value) in old_page.iter_slot_values_starting_from(last_slot_id) {
-                    let point_offset = slot.point_offset();
-
-                    if slot.deleted() {
-                        continue 'slots;
-                    }
-
-                    let was_inserted = if let Some(value) = value {
-                        new_page.insert_value(point_offset, value)
-                    } else {
-                        new_page.insert_placeholder_value(point_offset)
-                    };
-
-                    if was_inserted.is_none() {
-                        // new page is full, create a new one
-                        size_hint = value.map(|v| v.len());
+                match self.transfer_page_values(
+                    old_page_id,
+                    new_page_id,
+                    last_slot_id,
+                    &mut page_tracker,
+                ) {
+                    ControlFlow::Break((slot_id, hint)) => {
+                        // page is full, create a new one
+                        size_hint = hint;
+                        last_slot_id = slot_id;
                         continue 'new_page;
                     }
-
-                    let slot_id = was_inserted.expect("a value should always fit at this point");
-
-                    let new_pointer = PagePointer {
-                        page_id: new_page_id,
-                        slot_id,
-                    };
-
-                    // update page tracker
-                    page_tracker.set(point_offset, new_pointer);
-
-                    // prepare for next iteration
-                    last_slot_id += 1;
+                    ControlFlow::Continue(()) => {}
                 }
-                // drop read and write guards
-                drop(old_page);
-                drop(new_page);
 
-                // delete old page
+                // delete old page, page tracker shouldn't point to this page anymore.
                 let page_to_remove = self.pages.remove(&old_page_id).unwrap();
-                last_slot_id = 0;
 
                 // All points in this page have been updated to the new page in the page tracker,
                 // so there should not be any outstanding references to this page.
@@ -309,10 +296,11 @@ impl PayloadStorage {
                 Arc::into_inner(page_to_remove)
                     .unwrap()
                     .into_inner()
-                    .drop_page();
+                    .delete_page();
 
                 match pages_to_defrag.next() {
                     Some((page_id, _defrag_space)) => {
+                        last_slot_id = 0;
                         old_page_id = page_id;
                     }
                     // No more pages to defrag, end compaction
@@ -320,6 +308,78 @@ impl PayloadStorage {
                 };
             }
         }
+
+        true
+    }
+
+    /// Transfer all values from one page to the other, and update the page tracker.
+    ///
+    /// If the values do not fit, returns `ControlFlow::Break` with the pending slot id and a size hint to create another page.
+    fn transfer_page_values(
+        &self,
+        old_page_id: PageId,
+        new_page_id: PageId,
+        from_slot_id: SlotId,
+        page_tracker: &mut PageTracker,
+    ) -> ControlFlow<(SlotId, Option<usize>), ()> {
+        let mut current_slot_id = from_slot_id;
+
+        let old_page = self.pages.get(&old_page_id).unwrap().read();
+        let mut new_page = self.pages.get(&new_page_id).unwrap().write();
+
+        for (slot, value) in old_page.iter_slot_values_starting_from(current_slot_id) {
+            match Self::move_value(slot, value, &mut new_page, new_page_id, page_tracker) {
+                ControlFlow::Break(size_hint) => {
+                    return ControlFlow::Break((current_slot_id, size_hint))
+                }
+                ControlFlow::Continue(()) => {}
+            }
+
+            // prepare for next iteration
+            current_slot_id += 1;
+        }
+
+        ControlFlow::Continue(())
+    }
+
+    /// Move a value from one page to another.
+    ///
+    /// If the value does not fit in the new one, returns `ControlFlow::Break` with a size hint to create another page.
+    fn move_value(
+        current_slot: &SlotHeader,
+        value: Option<&[u8]>,
+        new_page: &mut SlottedPageMmap,
+        new_page_id: PageId,
+        page_tracker: &mut PageTracker,
+    ) -> ControlFlow<Option<usize>, ()> {
+        let point_offset = current_slot.point_offset();
+
+        if current_slot.deleted() {
+            // value was deleted, skip
+            return ControlFlow::Continue(());
+        }
+
+        let was_inserted = if let Some(value) = value {
+            new_page.insert_value(point_offset, value)
+        } else {
+            new_page.insert_placeholder_value(point_offset)
+        };
+
+        let Some(slot_id) = was_inserted else {
+            // new page is full, request to create a new one
+            let size_hint = value.map(|v| v.len());
+            return ControlFlow::Break(size_hint);
+        };
+
+        let new_pointer = PagePointer {
+            page_id: new_page_id,
+            slot_id,
+        };
+
+        // update page tracker
+        page_tracker.set(point_offset, new_pointer);
+
+        ControlFlow::Continue(())
     }
 }
 
@@ -747,14 +807,14 @@ mod tests {
             .map(|_| one_random_payload_please(rng, 10))
             .collect::<Vec<_>>();
 
-        for i in 0..max_point_offset {
-            storage.put_payload(i as u32, large_payloads[i].clone());
+        for (i, payload) in large_payloads.iter().enumerate() {
+            storage.put_payload(i as u32, payload.clone());
         }
 
         // sanity check
-        for i in 0..max_point_offset {
+        for (i, payload) in large_payloads.iter().enumerate() {
             let stored_payload = storage.get_payload(i as u32);
-            assert_eq!(stored_payload.as_ref(), Some(&large_payloads[i]));
+            assert_eq!(stored_payload.as_ref(), Some(payload));
         }
 
         // check no fragmentation
@@ -766,14 +826,16 @@ mod tests {
         let small_payloads = (0..max_point_offset)
             .map(|_| one_random_payload_please(rng, 1))
             .collect::<Vec<_>>();
-        for i in 0..max_point_offset {
-            storage.put_payload(i as u32, small_payloads[i].clone());
+        
+        for (i, payload) in small_payloads.iter().enumerate() {
+            storage.put_payload(i as u32, payload.clone());
         }
 
         // sanity check
-        for i in 0..max_point_offset {
+        // check consistency
+        for (i, payload) in small_payloads.iter().enumerate() {
             let stored_payload = storage.get_payload(i as u32);
-            assert_eq!(stored_payload.as_ref(), Some(&small_payloads[i]));
+            assert_eq!(stored_payload.as_ref(), Some(payload));
         }
 
         // check fragmentation
@@ -783,9 +845,9 @@ mod tests {
         storage.compact();
 
         // check consistency
-        for i in 0..max_point_offset {
+        for (i, payload) in small_payloads.iter().enumerate() {
             let stored_payload = storage.get_payload(i as u32);
-            assert_eq!(stored_payload.as_ref(), Some(&small_payloads[i]));
+            assert_eq!(stored_payload.as_ref(), Some(payload));
         }
 
         // check no outstanding fragmentation
