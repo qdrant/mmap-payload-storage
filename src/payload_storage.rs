@@ -508,4 +508,100 @@ mod tests {
         assert!(stored_payload.is_some());
         assert_eq!(stored_payload.unwrap(), payload);
     }
+
+    const HM_FIELDS: [&str; 23] = [
+        "article_id",
+        "product_code",
+        "prod_name",
+        "product_type_no",
+        "product_type_name",
+        "product_group_name",
+        "graphical_appearance_no",
+        "graphical_appearance_name",
+        "colour_group_code",
+        "colour_group_name",
+        "perceived_colour_value_id",
+        "perceived_colour_value_name",
+        "perceived_colour_master_id",
+        "perceived_colour_master_name",
+        "department_no",
+        "department_name",
+        "index_code,index_name",
+        "index_group_no",
+        "index_group_name",
+        "section_no,section_name",
+        "garment_group_no",
+        "garment_group_name",
+        "detail_desc",
+    ];
+
+    #[test]
+    fn test_with_real_hm_data() {
+        const EXPECTED_LEN: usize = 105_542;
+
+        fn write_data(storage: &mut PayloadStorage, init_offset: u32) -> u32 {
+            let csv_data = include_str!("../data/h&m-articles.csv");
+            let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
+            let mut point_offset = init_offset;
+            for result in rdr.records() {
+                let record = result.unwrap();
+                let mut payload = Payload::default();
+                for (i, field) in HM_FIELDS.iter().enumerate() {
+                    payload.0.insert(
+                        field.to_string(),
+                        Value::String(record.get(i).unwrap().to_string()),
+                    );
+                }
+                storage.put_payload(point_offset, payload);
+                point_offset += 1;
+            }
+            point_offset
+        }
+
+        fn storage_double_pass_is_consistent(storage: &PayloadStorage) {
+            // validate storage value equality between the two writes
+            let csv_data = include_str!("../data/h&m-articles.csv");
+            let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
+            for (index, result) in rdr.records().enumerate() {
+                let record = result.unwrap();
+                let first = storage.get_payload(index as u32).unwrap();
+                let second = storage.get_payload((index + EXPECTED_LEN) as u32).unwrap();
+                assert_eq!(first, second);
+                // validate the payload against record
+                for (i, field) in HM_FIELDS.iter().enumerate() {
+                    assert_eq!(
+                        first.0.get(*field).unwrap().as_str().unwrap(),
+                        record.get(i).unwrap()
+                    );
+                }
+            }
+        }
+
+        let (dir, mut storage) = empty_storage();
+        // load data into storage
+        let point_offset = write_data(&mut storage, 0);
+        assert_eq!(point_offset, EXPECTED_LEN as u32);
+        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN);
+        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN);
+        assert_eq!(storage.pages.len(), 2);
+
+        // write the same payload a second time
+        let point_offset = write_data(&mut storage, point_offset);
+        assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
+        assert_eq!(storage.pages.len(), 3);
+        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN * 2);
+
+        // assert storage is consistent
+        storage_double_pass_is_consistent(&storage);
+
+        // drop storage
+        drop(storage);
+
+        // reopen storage
+        let storage = PayloadStorage::open(dir.path().to_path_buf()).unwrap();
+
+        // assert storage is consistent after reopening
+        storage_double_pass_is_consistent(&storage);
+    }
 }
