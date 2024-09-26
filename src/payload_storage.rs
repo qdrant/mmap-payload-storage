@@ -718,7 +718,10 @@ mod tests {
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 3);
         assert_eq!(storage.page_tracker.read().mapping_len(), EXPECTED_LEN * 2);
-        assert_eq!(storage.page_tracker.read().raw_mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(
+            storage.page_tracker.read().raw_mapping_len(),
+            EXPECTED_LEN * 2
+        );
 
         // assert storage is consistent
         storage_double_pass_is_consistent(&storage);
@@ -732,7 +735,7 @@ mod tests {
         // assert storage is consistent after reopening
         storage_double_pass_is_consistent(&storage);
     }
-    
+
     #[test]
     fn test_compaction() {
         let (_dir, mut storage) = empty_storage();
@@ -743,22 +746,22 @@ mod tests {
         let large_payloads = (0..max_point_offset)
             .map(|_| one_random_payload_please(rng, 10))
             .collect::<Vec<_>>();
-        
+
         for i in 0..max_point_offset {
             storage.put_payload(i as u32, large_payloads[i].clone());
         }
-        
+
         // sanity check
         for i in 0..max_point_offset {
             let stored_payload = storage.get_payload(i as u32);
             assert_eq!(stored_payload.as_ref(), Some(&large_payloads[i]));
         }
-        
+
         // check no fragmentation
         for page in storage.pages.values() {
             assert_eq!(page.read().fragmented_space(), 0);
         }
-        
+
         // update with smaller values
         let small_payloads = (0..max_point_offset)
             .map(|_| one_random_payload_please(rng, 1))
@@ -766,25 +769,25 @@ mod tests {
         for i in 0..max_point_offset {
             storage.put_payload(i as u32, small_payloads[i].clone());
         }
-        
+
         // sanity check
         for i in 0..max_point_offset {
             let stored_payload = storage.get_payload(i as u32);
             assert_eq!(stored_payload.as_ref(), Some(&small_payloads[i]));
         }
-        
+
         // check fragmentation
         assert!(!storage.pages_to_defrag().is_empty());
-        
+
         // compaction
         storage.compact();
-        
+
         // check consistency
         for i in 0..max_point_offset {
             let stored_payload = storage.get_payload(i as u32);
             assert_eq!(stored_payload.as_ref(), Some(&small_payloads[i]));
         }
-        
+
         // check no outstanding fragmentation
         assert!(storage.pages_to_defrag().is_empty());
     }
