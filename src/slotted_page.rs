@@ -787,4 +787,53 @@ mod tests {
         // The caller must delete and create a new value
         assert!(!mmap.update_value(0, large_value.as_slice()));
     }
+
+    #[test]
+    fn test_fragmentation_calculation() {
+        let file = Builder::new()
+            .prefix("test-pages")
+            .suffix(".data")
+            .tempfile()
+            .unwrap();
+        let path = file.path();
+
+        let mut mmap = SlottedPageMmap::new(path, None);
+
+        let big_value = [1; 200];
+        for i in 0..500 {
+            mmap.insert_value(i, &big_value);
+        }
+
+        let mut fragmented_space = mmap.fragmented_space();
+
+        assert_eq!(fragmented_space, 0);
+
+        // delete some values
+        for i in 0..500 {
+            if i % 2 == 0 {
+                mmap.delete_value(i);
+            }
+        }
+
+        fragmented_space = mmap.fragmented_space();
+
+        // 250 values are deleted, so 250 * 200 bytes are fragmented
+        assert_eq!(fragmented_space, 250 * 200);
+
+        // update some values
+        let min_value = [1; SlottedPageMmap::MIN_VALUE_SIZE_BYTES];
+        for i in 0..500 {
+            if i % 2 == 1 {
+                mmap.update_value(i, &min_value);
+            }
+        }
+
+        fragmented_space = mmap.fragmented_space();
+
+        // 250 values are updated, so 250 * (200 - MIN_VALUE_SIZE_BYTES) bytes are fragmented.
+        // Plus the ones that were deleted before.
+        let expected_fragmentation =
+            250 * (200 - SlottedPageMmap::MIN_VALUE_SIZE_BYTES) + 250 * 200;
+        assert_eq!(fragmented_space, expected_fragmentation);
+    }
 }
