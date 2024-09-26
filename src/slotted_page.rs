@@ -123,8 +123,8 @@ impl SlottedPageMmap {
     pub fn iter_slot_values_starting_from(
         &self,
         slot_id: SlotId,
-    ) -> impl Iterator<Item = (&SlotHeader, Option<&[u8]>)> + '_ {
-        if slot_id as u64 >= self.header.slot_count {
+    ) -> impl Iterator<Item = (&SlotHeader, Option<&[u8]>)> + '_ {        
+        if slot_id as u64 >= self.header.slot_count && self.header.slot_count > 0 {
             panic!("Slot id out of bounds")
         }
 
