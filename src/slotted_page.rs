@@ -41,29 +41,45 @@ impl SlottedPageHeader {
 pub struct SlotHeader {
     offset: u64,       // offset in the page (8 bytes)
     length: u64,       // length of the value (8 bytes)
+    point_offset: u32, // point id (4 bytes)
     right_padding: u8, // padding within the value for small values (1 byte)
     deleted: bool,     // whether the value has been deleted (1 byte)
-    _align: [u8; 6],   // 6 bytes padding for alignment
+    _align: [u8; 2],   // 2 bytes padding for alignment
 }
 
 impl SlotHeader {
     pub const fn size_in_bytes() -> usize {
         size_of::<Self>()
-        // 24 // 8 + 8 + 1 + 1 + 6 padding
+        // 24 // 8 + 8 + 4 + 1 + 1 + 2 padding
     }
 
-    fn new(offset: u64, length: u64, right_padding: u8, deleted: bool) -> SlotHeader {
+    fn new(
+        point_offset: u32,
+        offset: u64,
+        length: u64,
+        right_padding: u8,
+        deleted: bool,
+    ) -> SlotHeader {
         assert!(
             length >= SlottedPageMmap::MIN_VALUE_SIZE_BYTES as u64,
             "Value too small"
         );
         SlotHeader {
+            point_offset,
             offset,
             length,
             right_padding,
             deleted,
-            _align: [0; 6],
+            _align: [0; 2],
         }
+    }
+
+    pub fn point_offset(&self) -> u32 {
+        self.point_offset
+    }
+
+    pub fn deleted(&self) -> bool {
+        self.deleted
     }
 }
 
@@ -87,33 +103,47 @@ impl SlottedPageMmap {
     const PLACEHOLDER_VALUE: [u8; SlottedPageMmap::MIN_VALUE_SIZE_BYTES] =
         [0; SlottedPageMmap::MIN_VALUE_SIZE_BYTES];
 
+    pub const FRAGMENTATION_THRESHOLD_RATIO: f32 = 0.5;
+
     /// Flushes outstanding memory map modifications to disk.
     fn flush(&self) {
         self.mmap.flush().unwrap();
     }
 
-    /// Return all values in the page with deleted values as None
-    fn all_values(&self) -> Vec<Option<&[u8]>> {
-        let mut values = Vec::new();
-        for i in 0..self.header.slot_count {
-            let slot = self.get_slot(&(i as u32)).unwrap();
-            // skip values associated with deleted slots
-            if slot.deleted {
-                values.push(None);
-                continue;
-            }
-            match self.get_slot_value(&slot) {
-                Some(value) => values.push(Some(value)),
-                None => values.push(None),
-            }
-        }
-        // values are stored in reverse order
-        values.reverse();
-        values
+    /// Return all values in the page with placeholder or deleted values as `None`
+    #[cfg(test)]
+    pub fn all_values(&self) -> Vec<Option<&[u8]>> {
+        self.iter_slot_values_starting_from(0)
+            .map(|(_, value)| value)
+            .collect()
     }
 
-    /// Returns all non deleted values in the page
-    fn values(&self) -> Vec<&[u8]> {
+    /// Iterate over all values in the page, starting at the provided slot id.
+    ///
+    /// `None` values can be either placeholders, or deleted values
+    pub fn iter_slot_values_starting_from(
+        &self,
+        slot_id: SlotId,
+    ) -> impl Iterator<Item = (&SlotHeader, Option<&[u8]>)> + '_ {
+        if slot_id as u64 >= self.header.slot_count && self.header.slot_count > 0 {
+            panic!("Slot id out of bounds")
+        }
+
+        (slot_id as u64..self.header.slot_count).map(move |i| {
+            let slot = self.get_slot_ref(&(i as u32)).unwrap();
+            let value = if slot.deleted {
+                None
+            } else {
+                self.get_slot_value(slot)
+            };
+
+            (slot, value)
+        })
+    }
+
+    /// Returns all non deleted values in the page. `None` values means that the slot is a placeholder
+    #[cfg(test)]
+    fn non_deleted_values(&self) -> Vec<&[u8]> {
         let mut values = Vec::new();
         for i in 0..self.header.slot_count {
             let slot = self.get_slot(&(i as u32)).unwrap();
@@ -125,8 +155,6 @@ impl SlottedPageMmap {
                 values.push(value)
             }
         }
-        // values are stored in reverse order
-        values.reverse();
         values
     }
 
@@ -180,6 +208,10 @@ impl SlottedPageMmap {
 
     /// Get the slot associated with the slot id.
     fn get_slot(&self, slot_id: &u32) -> Option<SlotHeader> {
+        self.get_slot_ref(slot_id).cloned()
+    }
+
+    fn get_slot_ref(&self, slot_id: &SlotId) -> Option<&SlotHeader> {
         let slot_count = self.header.slot_count;
         if *slot_id >= slot_count as u32 {
             return None;
@@ -190,7 +222,8 @@ impl SlottedPageMmap {
         let start = slot_offset;
         let end = start + size_of::<SlotHeader>();
         let slot: &SlotHeader = transmute_from_u8(&self.mmap[start..end]);
-        Some(slot.clone())
+
+        Some(slot)
     }
 
     /// Get value associated with the slot
@@ -211,6 +244,7 @@ impl SlottedPageMmap {
     }
 
     /// Check if there is enough space for a new slot + min value
+    #[cfg(test)]
     fn has_capacity_for_min_value(&self) -> bool {
         self.free_space()
             .saturating_sub(SlotHeader::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES)
@@ -237,6 +271,35 @@ impl SlottedPageMmap {
         data_start_offset.saturating_sub(last_slot_offset)
     }
 
+    pub fn page_size(&self) -> usize {
+        self.header.page_size()
+    }
+
+    /// Sums the amount of unused space in between the data.
+    pub fn fragmented_space(&self) -> usize {
+        let mut fragmented_space = 0;
+
+        let mut slot_id = 0;
+        let mut last_offset = self.page_size() as u64;
+        while let Some(slot) = self.get_slot_ref(&slot_id) {
+            // if the slot is deleted, we can consider it empty space
+            if slot.deleted {
+                fragmented_space += slot.length;
+            }
+
+            // check the empty space between the last slot and the end of the current slot
+            fragmented_space += last_offset
+                .checked_sub(slot.offset + slot.length)
+                .expect("last_offset should be to the right of the current slot end");
+
+            // update for next iteration
+            last_offset = slot.offset;
+            slot_id += 1;
+        }
+
+        fragmented_space as usize
+    }
+
     /// Compute the start and end offsets for the slot
     fn offsets_for_slot(&self, slot_id: SlotId) -> (usize, usize) {
         let slot_offset =
@@ -247,8 +310,8 @@ impl SlottedPageMmap {
     }
 
     /// Insert a new placeholder into the page
-    pub fn insert_placeholder_value(&mut self) -> Option<SlotId> {
-        self.insert_value(&SlottedPageMmap::PLACEHOLDER_VALUE)
+    pub fn insert_placeholder_value(&mut self, point_id: u32) -> Option<SlotId> {
+        self.insert_value(point_id, &SlottedPageMmap::PLACEHOLDER_VALUE)
     }
 
     /// Insert a new value into the page
@@ -256,7 +319,7 @@ impl SlottedPageMmap {
     /// Returns
     /// - None if there is not enough space for a new slot + value
     /// - Some(slot_id) if the value was successfully added
-    pub fn insert_value(&mut self, value: &[u8]) -> Option<SlotId> {
+    pub fn insert_value(&mut self, point_offset: u32, value: &[u8]) -> Option<SlotId> {
         // size of the value in bytes
         let real_value_size = value.len();
 
@@ -278,6 +341,7 @@ impl SlottedPageMmap {
         let slot_count = self.header.slot_count;
         let next_slot_id = slot_count as SlotId;
         let slot = SlotHeader::new(
+            point_offset,
             new_data_start_offset as u64,
             value_len as u64,
             padding as u8,
@@ -357,6 +421,7 @@ impl SlottedPageMmap {
         // actual value size accounting for the minimum value size
         let value_len = real_value_size + right_padding;
         let update_slot = SlotHeader::new(
+            slot.point_offset,
             value_start as u64,  // new offset value
             value_len as u64,    // new value size
             right_padding as u8, // new padding
@@ -367,6 +432,12 @@ impl SlottedPageMmap {
         self.write_slot(slot_id, update_slot);
 
         true
+    }
+
+    /// Delete the page from the filesystem.
+    pub fn delete_page(self) {
+        drop(self.mmap);
+        std::fs::remove_file(&self.path).unwrap();
     }
 
     // TODO
@@ -455,9 +526,11 @@ mod tests {
         let mut mmap = SlottedPageMmap::open(path).unwrap();
 
         let mut free_space = mmap.free_space();
+        let mut sequence = 0u32..;
         // add placeholder values
         while mmap.has_capacity_for_min_value() {
-            mmap.insert_placeholder_value().unwrap();
+            mmap.insert_placeholder_value(sequence.next().unwrap())
+                .unwrap();
             let new_free_space = mmap.free_space();
             assert!(new_free_space < free_space);
             free_space = new_free_space;
@@ -468,7 +541,10 @@ mod tests {
         assert_eq!(mmap.free_space(), 104); // not enough space for a new slot + placeholder value
 
         // can't add more values
-        assert_eq!(mmap.insert_placeholder_value(), None);
+        assert_eq!(
+            mmap.insert_placeholder_value(sequence.next().unwrap()),
+            None
+        );
 
         // drop and reopen
         drop(mmap);
@@ -477,7 +553,7 @@ mod tests {
         assert_eq!(mmap.header.data_start_offset, 5_298_176);
 
         assert_eq!(mmap.all_values().len(), expected_slot_count as usize);
-        assert_eq!(mmap.values().len(), 0);
+        assert_eq!(mmap.non_deleted_values().len(), 0);
     }
 
     #[test]
@@ -494,8 +570,8 @@ mod tests {
         assert_eq!(values.len(), 0);
 
         // add 10 placeholder values
-        for _ in 0..10 {
-            mmap.insert_placeholder_value().unwrap();
+        for i in 0..10 {
+            mmap.insert_placeholder_value(i).unwrap();
         }
 
         assert_eq!(mmap.header.slot_count, 10);
@@ -540,7 +616,8 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.insert_value(foo.to_bytes().as_slice()).unwrap();
+            mmap.insert_value(i as u32, foo.to_bytes().as_slice())
+                .unwrap();
         }
 
         assert_eq!(mmap.header.slot_count, 100);
@@ -589,7 +666,8 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.insert_value(foo.to_bytes().as_slice()).unwrap();
+            mmap.insert_value(i as u32, foo.to_bytes().as_slice())
+                .unwrap();
         }
 
         // delete slot 10
@@ -598,7 +676,7 @@ mod tests {
         assert!(mmap.get_slot(&10).unwrap().deleted);
 
         assert_eq!(mmap.all_values().len(), 100);
-        assert_eq!(mmap.values().len(), 99)
+        assert_eq!(mmap.non_deleted_values().len(), 99)
     }
 
     #[test]
@@ -616,7 +694,7 @@ mod tests {
 
         // push one value
         let foo = Foo { bar: 1, qux: true };
-        mmap.insert_value(foo.to_bytes().as_slice()).unwrap();
+        mmap.insert_value(0, foo.to_bytes().as_slice()).unwrap();
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
@@ -651,7 +729,7 @@ mod tests {
         assert_eq!(values.len(), 0);
 
         // push placeholder value
-        mmap.insert_placeholder_value().unwrap();
+        mmap.insert_placeholder_value(0).unwrap();
         let values = mmap.all_values();
         assert_eq!(values.len(), 1);
         assert_eq!(mmap.get_value(&0), None);
@@ -687,7 +765,7 @@ mod tests {
         assert_eq!(values.len(), 0);
 
         // push placeholder value
-        mmap.insert_placeholder_value().unwrap();
+        mmap.insert_placeholder_value(0).unwrap();
         let values = mmap.all_values();
         assert_eq!(values.len(), 1);
         assert_eq!(mmap.get_value(&0), None);
@@ -708,5 +786,54 @@ mod tests {
         // None because the new value is larger than the current value
         // The caller must delete and create a new value
         assert!(!mmap.update_value(0, large_value.as_slice()));
+    }
+
+    #[test]
+    fn test_fragmentation_calculation() {
+        let file = Builder::new()
+            .prefix("test-pages")
+            .suffix(".data")
+            .tempfile()
+            .unwrap();
+        let path = file.path();
+
+        let mut mmap = SlottedPageMmap::new(path, None);
+
+        let big_value = [1; 200];
+        for i in 0..500 {
+            mmap.insert_value(i, &big_value);
+        }
+
+        let mut fragmented_space = mmap.fragmented_space();
+
+        assert_eq!(fragmented_space, 0);
+
+        // delete some values
+        for i in 0..500 {
+            if i % 2 == 0 {
+                mmap.delete_value(i);
+            }
+        }
+
+        fragmented_space = mmap.fragmented_space();
+
+        // 250 values are deleted, so 250 * 200 bytes are fragmented
+        assert_eq!(fragmented_space, 250 * 200);
+
+        // update some values
+        let min_value = [1; SlottedPageMmap::MIN_VALUE_SIZE_BYTES];
+        for i in 0..500 {
+            if i % 2 == 1 {
+                mmap.update_value(i, &min_value);
+            }
+        }
+
+        fragmented_space = mmap.fragmented_space();
+
+        // 250 values are updated, so 250 * (200 - MIN_VALUE_SIZE_BYTES) bytes are fragmented.
+        // Plus the ones that were deleted before.
+        let expected_fragmentation =
+            250 * (200 - SlottedPageMmap::MIN_VALUE_SIZE_BYTES) + 250 * 200;
+        assert_eq!(fragmented_space, expected_fragmentation);
     }
 }
