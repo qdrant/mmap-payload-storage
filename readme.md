@@ -21,7 +21,7 @@ New experimental storage for vector payloads using mmap.
 
 ## TODOs
 
-- [ ] compaction to decrease fragmentation
+- [ ] non write blocking compaction
 - [ ] benchmarking with realistic data payload (CPU + memory usage)
 - [ ] run unit tests different page sizes
 - [ ] test best fitting page logic

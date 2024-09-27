@@ -40,7 +40,12 @@ pub fn one_random_payload_please(rng: &mut impl Rng, size_factor: usize) -> Payl
             "word": word, // string
             "sentence": sentence, // string
             "number": rng.gen_range(0..1000), // number
-            "indices": indices // array of numbers
+            "indices": indices, // array of numbers
+            "bool": rng.gen_bool(0.5), // boolean
+            "null": serde_json::Value::Null, // null
+            "object": {
+                "bool": rng.gen_bool(0.5),
+            }, // object
         }
     )
     .as_object()
@@ -49,3 +54,29 @@ pub fn one_random_payload_please(rng: &mut impl Rng, size_factor: usize) -> Payl
 
     payload
 }
+
+pub const HM_FIELDS: [&str; 23] = [
+    "article_id",
+    "product_code",
+    "prod_name",
+    "product_type_no",
+    "product_type_name",
+    "product_group_name",
+    "graphical_appearance_no",
+    "graphical_appearance_name",
+    "colour_group_code",
+    "colour_group_name",
+    "perceived_colour_value_id",
+    "perceived_colour_value_name",
+    "perceived_colour_master_id",
+    "perceived_colour_master_name",
+    "department_no",
+    "department_name",
+    "index_code,index_name",
+    "index_group_no",
+    "index_group_name",
+    "section_no,section_name",
+    "garment_group_no",
+    "garment_group_name",
+    "detail_desc",
+];

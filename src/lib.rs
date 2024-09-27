@@ -1,6 +1,6 @@
 pub mod fixtures;
 mod page_tracker;
-mod payload;
+pub mod payload;
 mod payload_storage;
 mod slotted_page;
 mod utils_copied;
