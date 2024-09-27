@@ -802,8 +802,11 @@ mod tests {
         let mut storage = PayloadStorage::open(dir.path().to_path_buf()).unwrap();
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 3);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.page_tracker.read().mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(
+            storage.page_tracker.read().raw_mapping_len(),
+            EXPECTED_LEN * 2
+        );
 
         // assert storage is consistent after reopening
         storage_double_pass_is_consistent(&storage, 0);
