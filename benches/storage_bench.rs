@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use serde_json::Value;
 use mmap_payload_storage::fixtures::{empty_storage, one_random_payload_please, HM_FIELDS};
 use mmap_payload_storage::payload::Payload;
+use serde_json::Value;
 
 /// sized similarly to the real dataset for a fair comparison
 const PAYLOAD_COUNT: usize = 100_000;
