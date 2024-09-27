@@ -746,20 +746,29 @@ mod tests {
             point_offset
         }
 
-        fn storage_double_pass_is_consistent(storage: &PayloadStorage) {
+        fn storage_double_pass_is_consistent(storage: &PayloadStorage, right_shift_offset: u32) {
             // validate storage value equality between the two writes
             let csv_data = include_str!("../data/h&m-articles.csv");
             let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
-            for (index, result) in rdr.records().enumerate() {
+            for (row_index, result) in rdr.records().enumerate() {
                 let record = result.unwrap();
-                let first = storage.get_payload(index as u32).unwrap();
-                let second = storage.get_payload((index + EXPECTED_LEN) as u32).unwrap();
+                // apply shift offset
+                let storage_index = row_index as u32 + right_shift_offset;
+                let first = storage.get_payload(storage_index).unwrap();
+                let second = storage
+                    .get_payload(storage_index + EXPECTED_LEN as u32)
+                    .unwrap();
+                // assert the two payloads are equal
                 assert_eq!(first, second);
                 // validate the payload against record
                 for (i, field) in HM_FIELDS.iter().enumerate() {
                     assert_eq!(
                         first.0.get(*field).unwrap().as_str().unwrap(),
-                        record.get(i).unwrap()
+                        record.get(i).unwrap(),
+                        "failed for id {} with shift {} for field: {}",
+                        row_index,
+                        right_shift_offset,
+                        field
                     );
                 }
             }
@@ -784,16 +793,34 @@ mod tests {
         );
 
         // assert storage is consistent
-        storage_double_pass_is_consistent(&storage);
+        storage_double_pass_is_consistent(&storage, 0);
 
         // drop storage
         drop(storage);
 
         // reopen storage
-        let storage = PayloadStorage::open(dir.path().to_path_buf()).unwrap();
+        let mut storage = PayloadStorage::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
+        assert_eq!(storage.pages.len(), 3);
+        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent after reopening
-        storage_double_pass_is_consistent(&storage);
+        storage_double_pass_is_consistent(&storage, 0);
+
+        // update values shifting point offset by 1 to the right
+        // loop from the end to the beginning to avoid overwriting
+        let offset: u32 = 1;
+        for i in (0..EXPECTED_LEN).rev() {
+            let payload = storage.get_payload(i as u32).unwrap();
+            // move first write to the right
+            storage.put_payload(i as u32 + offset, payload.clone());
+            // move second write to the right
+            storage.put_payload(i as u32 + offset + EXPECTED_LEN as u32, payload);
+        }
+
+        // assert storage is consistent after updating
+        storage_double_pass_is_consistent(&storage, offset);
     }
 
     #[test]
