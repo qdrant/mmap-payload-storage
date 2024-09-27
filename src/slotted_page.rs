@@ -105,6 +105,11 @@ impl SlottedPageMmap {
 
     pub const FRAGMENTATION_THRESHOLD_RATIO: f32 = 0.5;
 
+    /// Minimum new page size required for a value of the given size.
+    pub fn page_size_for_value(value_size: usize) -> usize {
+        value_size + size_of::<SlotHeader>() + size_of::<SlotHeader>()
+    }
+
     /// Flushes outstanding memory map modifications to disk.
     fn flush(&self) {
         self.mmap.flush().unwrap();
@@ -835,5 +840,15 @@ mod tests {
         let expected_fragmentation =
             250 * (200 - SlottedPageMmap::MIN_VALUE_SIZE_BYTES) + 250 * 200;
         assert_eq!(fragmented_space, expected_fragmentation);
+    }
+
+    #[test]
+    fn test_page_size_for_value() {
+        let value_size = 128;
+        let page_size = SlottedPageMmap::page_size_for_value(value_size);
+        assert_eq!(
+            page_size,
+            128 + SlotHeader::size_in_bytes() + SlotHeader::size_in_bytes()
+        );
     }
 }

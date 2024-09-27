@@ -140,6 +140,12 @@ impl PayloadStorage {
         new_page_id
     }
 
+    /// Create a new page adapted to the payload size and return its id.
+    fn create_new_page_for_payload(&mut self, payload_size: usize) -> u32 {
+        let size_hint = SlottedPageMmap::page_size_for_value(payload_size);
+        self.create_new_page(Some(size_hint))
+    }
+
     /// Get the mapping for a given point offset
     fn get_pointer(&self, point_offset: PointOffset) -> Option<PagePointer> {
         self.page_tracker.read().get(point_offset).copied()
@@ -165,7 +171,7 @@ impl PayloadStorage {
                     .find_best_fitting_page(payload_size)
                     .unwrap_or_else(|| {
                         // create a new page
-                        self.create_new_page(Some(payload_size))
+                        self.create_new_page_for_payload(payload_size)
                     });
                 let mut page = self.pages.get_mut(&new_page_id).unwrap().write();
                 let new_slot_id = page.insert_value(point_offset, &comp_payload).unwrap();
@@ -180,7 +186,7 @@ impl PayloadStorage {
                 .find_best_fitting_page(payload_size)
                 .unwrap_or_else(|| {
                     // create a new page
-                    self.create_new_page(Some(payload_size))
+                    self.create_new_page_for_payload(payload_size)
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
@@ -539,12 +545,14 @@ mod tests {
             let operation = rng.gen_range(0..3);
             match operation {
                 0 => {
-                    let payload = one_random_payload_please(rng, 2);
+                    let size_factor = rng.gen_range(1..10);
+                    let payload = one_random_payload_please(rng, size_factor);
                     Operation::Put(point_offset, payload)
                 }
                 1 => Operation::Delete(point_offset),
                 2 => {
-                    let payload = one_random_payload_please(rng, 2);
+                    let size_factor = rng.gen_range(1..10);
+                    let payload = one_random_payload_please(rng, size_factor);
                     Operation::Update(point_offset, payload)
                 }
                 _ => unreachable!(),
