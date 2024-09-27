@@ -43,6 +43,10 @@ impl PageTracker {
     pub fn new(path: &Path, size_hint: Option<usize>) -> Self {
         let path = path.join(Self::FILE_NAME);
         let size = size_hint.unwrap_or(Self::DEFAULT_SIZE);
+        assert!(
+            size > size_of::<PageTrackerHeader>(),
+            "Size hint is too small"
+        );
         create_and_ensure_length(&path, size).unwrap();
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header = PageTrackerHeader::default();
@@ -198,6 +202,7 @@ impl PageTracker {
 #[cfg(test)]
 mod tests {
     use crate::page_tracker::{PagePointer, PageTracker};
+    use rstest::rstest;
     use tempfile::Builder;
 
     #[test]
@@ -212,11 +217,14 @@ mod tests {
         assert_eq!(tracker.all_page_ids().len(), 0);
     }
 
-    #[test]
-    fn test_mapping_len_tracker() {
+    #[rstest]
+    #[case(10)]
+    #[case(100)]
+    #[case(1000)]
+    fn test_mapping_len_tracker(#[case] initial_tracker_size: usize) {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let mut tracker = PageTracker::new(path, None);
+        let mut tracker = PageTracker::new(path, Some(initial_tracker_size));
         assert!(tracker.is_empty());
         tracker.set(0, PagePointer::new(1, 1));
 
@@ -229,11 +237,14 @@ mod tests {
         assert_eq!(tracker.mapping_len(), 2);
     }
 
-    #[test]
-    fn test_set_get_clear_tracker() {
+    #[rstest]
+    #[case(10)]
+    #[case(100)]
+    #[case(1000)]
+    fn test_set_get_clear_tracker(#[case] initial_tracker_size: usize) {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let mut tracker = PageTracker::new(path, None);
+        let mut tracker = PageTracker::new(path, Some(initial_tracker_size));
         tracker.set(0, PagePointer::new(1, 1));
         tracker.set(1, PagePointer::new(2, 2));
         tracker.set(2, PagePointer::new(3, 3));
@@ -268,14 +279,17 @@ mod tests {
         assert_eq!(tracker.get(2), Some(&PagePointer::new(30, 30)));
     }
 
-    #[test]
-    fn test_persist_and_open_tracker() {
+    #[rstest]
+    #[case(10)]
+    #[case(100)]
+    #[case(1000)]
+    fn test_persist_and_open_tracker(#[case] initial_tracker_size: usize) {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
 
         let value_count: usize = 1000;
 
-        let mut tracker = PageTracker::new(path, None);
+        let mut tracker = PageTracker::new(path, Some(initial_tracker_size));
 
         for i in 0..value_count {
             // save only half of the values
@@ -310,21 +324,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_page_tracker_resize() {
+    #[rstest]
+    #[case(10)]
+    #[case(100)]
+    #[case(1000)]
+    fn test_page_tracker_resize(#[case] initial_tracker_size: usize) {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
 
-        // create a tracker with a tiny size to force a resize
-        let small_size = 10;
-        let mut tracker = PageTracker::new(path, Some(small_size));
+        let mut tracker = PageTracker::new(path, Some(initial_tracker_size));
         assert_eq!(tracker.mapping_len(), 0);
-        assert_eq!(tracker.mmap_file_size(), small_size);
+        assert_eq!(tracker.mmap_file_size(), initial_tracker_size);
 
-        for i in 0..100000 {
+        for i in 0..100_000 {
             tracker.set(i as u32, PagePointer::new(i as u32, i as u32));
         }
-        assert_eq!(tracker.mapping_len(), 100000);
-        assert!(tracker.mmap_file_size() > small_size);
+        assert_eq!(tracker.mapping_len(), 100_000);
+        assert!(tracker.mmap_file_size() > initial_tracker_size);
     }
 }
