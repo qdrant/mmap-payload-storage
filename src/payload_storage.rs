@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn test_put_huge_payload() {
+    fn test_handle_huge_payload() {
         let (_dir, mut storage) = empty_storage();
 
         let mut payload = Payload::default();
@@ -649,15 +649,43 @@ mod tests {
         assert!(stored_payload.is_some());
         assert_eq!(stored_payload.unwrap(), payload);
 
-        let page = storage.pages.get(&1).unwrap();
+        {
+            let page = storage.pages.get(&1).unwrap();
 
-        // the fitting page should be 64MB, so we should still have about 14MB of free space
-        let free_space = page.read().free_space();
-        assert!(
-            free_space > 1024 * 1024 * 13 && free_space < 1024 * 1024 * 15,
-            "free space should be around 14MB, but it is: {}",
-            free_space
-        );
+            // the fitting page should be 64MB, so we should still have about 14MB of free space
+            let free_space = page.read().free_space();
+            assert!(
+                free_space > 1024 * 1024 * 13 && free_space < 1024 * 1024 * 15,
+                "free space should be around 14MB, but it is: {}",
+                free_space
+            );
+
+            let fragmented_space = page.read().fragmented_space();
+            assert_eq!(fragmented_space, 0);
+        }
+
+        {
+            // delete payload
+            storage.delete_payload(0);
+            assert_eq!(storage.pages.len(), 1);
+
+            let page = storage.pages.get(&1).unwrap();
+
+            // check fragmentation
+            let fragmented_space = page.read().fragmented_space();
+            assert!(
+                fragmented_space > 1024 * 1024 * 49 && fragmented_space < 1024 * 1024 * 51,
+                "free space should be around 50MB, but it is: {}",
+                fragmented_space
+            );
+        }
+
+        // compact storage to remove fragmentation
+        storage.compact();
+
+        // the page has been reclaimed completely
+        assert!(!storage.pages.contains_key(&1));
+        assert!(storage.page_tracker.read().get(0).is_none());
     }
 
     #[test]
