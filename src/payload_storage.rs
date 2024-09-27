@@ -883,4 +883,14 @@ mod tests {
         // check no outstanding fragmentation
         assert!(storage.pages_to_defrag().is_empty());
     }
+
+    #[test]
+    fn test_payload_compression() {
+        let payload = one_random_payload_please(&mut rand::thread_rng(), 2);
+        let payload_bytes = payload.to_bytes();
+        let compressed = PayloadStorage::compress(&payload_bytes);
+        let decompressed = PayloadStorage::decompress(&compressed);
+        let decompressed_payload = Payload::from_bytes(&decompressed);
+        assert_eq!(payload, decompressed_payload);
+    }
 }
