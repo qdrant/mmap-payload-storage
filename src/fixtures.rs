@@ -4,9 +4,18 @@ use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
 use tempfile::{Builder, TempDir};
 
+/// Create an empty storage with the default configuration
 pub fn empty_storage() -> (TempDir, PayloadStorage) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-    let storage = PayloadStorage::new(dir.path().to_path_buf());
+    let storage = PayloadStorage::new(dir.path().to_path_buf(), None);
+    assert!(storage.is_empty());
+    (dir, storage)
+}
+
+/// Create an empty storage with a specific page size
+pub fn empty_storage_sized(page_size: usize) -> (TempDir, PayloadStorage) {
+    let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
+    let storage = PayloadStorage::new(dir.path().to_path_buf(), Some(page_size));
     assert!(storage.is_empty());
     (dir, storage)
 }
@@ -20,7 +29,7 @@ pub fn random_word(rng: &mut impl Rng) -> String {
     word
 }
 
-pub fn one_random_payload_please(rng: &mut impl Rng, size_factor: usize) -> Payload {
+pub fn random_payload(rng: &mut impl Rng, size_factor: usize) -> Payload {
     let mut payload = Payload::default();
 
     let word = random_word(rng);

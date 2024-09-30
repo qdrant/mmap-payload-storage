@@ -3,7 +3,7 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
-use std::cmp;
+use std::cmp::max;
 use std::path::{Path, PathBuf};
 
 pub type SlotId = u32;
@@ -16,19 +16,16 @@ struct SlottedPageHeader {
     /// The offset within the page where the data starts
     data_start_offset: u64,
 
-    /// The page size in bytes. Typically 32MB (33,554,432 bytes)
+    /// The page size in bytes.
     page_size: u64,
 }
 
 impl SlottedPageHeader {
     fn new(required_size: usize) -> SlottedPageHeader {
-        let page_size = cmp::max(SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES, required_size)
-            .next_power_of_two() as u64;
-
         SlottedPageHeader {
             slot_count: 0,
-            data_start_offset: page_size,
-            page_size,
+            data_start_offset: required_size as u64,
+            page_size: required_size as u64,
         }
     }
 
@@ -91,13 +88,10 @@ pub(crate) struct SlottedPageMmap {
 }
 
 impl SlottedPageMmap {
-    /// Slotted page is a page with a minimum size that contains slots and values.
-    pub const SLOTTED_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
-
     /// Expect JSON values to have roughly 3–5 fields with mostly small values.
     /// Therefore, reserve 128 bytes for each value in order to avoid frequent reallocations.
     /// For 1M values, this would require 128MB of memory.
-    pub const MIN_VALUE_SIZE_BYTES: usize = 128;
+    const MIN_VALUE_SIZE_BYTES: usize = 128;
 
     /// Placeholder value for empty slots
     const PLACEHOLDER_VALUE: [u8; SlottedPageMmap::MIN_VALUE_SIZE_BYTES] =
@@ -106,8 +100,15 @@ impl SlottedPageMmap {
     pub const FRAGMENTATION_THRESHOLD_RATIO: f32 = 0.5;
 
     /// Minimum new page size required for a value of the given size.
-    pub fn page_size_for_value(value_size: usize) -> usize {
-        value_size + size_of::<SlotHeader>() + size_of::<SlotHeader>()
+    pub fn new_page_size_for_value(value_size: usize) -> usize {
+        size_of::<SlotHeader>() + Self::required_size_for_value(value_size)
+    }
+
+    /// Minimum new size required for a value of the given size.
+    pub fn required_size_for_value(value_size: usize) -> usize {
+        // The value size should be at least the minimum value size
+        let max_value = max(value_size, Self::MIN_VALUE_SIZE_BYTES);
+        max_value + size_of::<SlotHeader>()
     }
 
     /// Flushes outstanding memory map modifications to disk.
@@ -175,10 +176,8 @@ impl SlottedPageMmap {
     }
 
     /// Create a new page at the given path
-    pub fn new(path: &Path, size_hint: Option<usize>) -> SlottedPageMmap {
-        let required_size = size_hint.unwrap_or(SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES);
+    pub fn new(path: &Path, required_size: usize) -> SlottedPageMmap {
         let header = SlottedPageHeader::new(required_size);
-
         let page_size = header.page_size();
         create_and_ensure_length(path, page_size).unwrap();
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
@@ -251,16 +250,12 @@ impl SlottedPageMmap {
     /// Check if there is enough space for a new slot + min value
     #[cfg(test)]
     fn has_capacity_for_min_value(&self) -> bool {
-        self.free_space()
-            .saturating_sub(SlotHeader::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES)
-            != 0
+        self.free_space() >= SlotHeader::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES
     }
 
     /// Check if there is enough space for a new slot + value
     fn has_capacity_for_value(&self, extra_len: usize) -> bool {
-        self.free_space()
-            .saturating_sub(SlotHeader::size_in_bytes() + extra_len)
-            != 0
+        self.free_space() >= SlotHeader::size_in_bytes() + extra_len
     }
 
     /// Return the amount of free space in the page
@@ -444,16 +439,6 @@ impl SlottedPageMmap {
         drop(self.mmap);
         std::fs::remove_file(&self.path).unwrap();
     }
-
-    // TODO
-    // - remove deleted slots and values
-    // - shift all values to the end of the page
-    // - update slot offsets
-    // - update header
-    // - the page tracker needs to be updated accordingly!
-    pub fn compact(&mut self) {
-        todo!("Compact the page");
-    }
 }
 
 // tests
@@ -463,6 +448,9 @@ mod tests {
     use rand::Rng;
     use serde::{Deserialize, Serialize};
     use tempfile::Builder;
+
+    // Smaller page size for testing
+    const TEST_PAGE_SIZE: usize = 2 * 1024 * 1024; // 2MB
 
     #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
     struct Foo {
@@ -495,11 +483,11 @@ mod tests {
 
         let path = file.path();
 
-        let mmap = SlottedPageMmap::new(path, None);
+        let mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
         // contains only the header
         assert_eq!(
             mmap.free_space(),
-            SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES - size_of::<SlottedPageHeader>()
+            TEST_PAGE_SIZE - size_of::<SlottedPageHeader>()
         );
         assert_eq!(mmap.header.slot_count, 0);
         assert!(mmap.get_slot(&0).is_none());
@@ -509,7 +497,7 @@ mod tests {
         let mmap = SlottedPageMmap::open(path).unwrap();
         assert_eq!(
             mmap.free_space(),
-            SlottedPageMmap::SLOTTED_PAGE_SIZE_BYTES - size_of::<SlottedPageHeader>()
+            TEST_PAGE_SIZE - size_of::<SlottedPageHeader>()
         );
         assert_eq!(mmap.header.slot_count, 0);
         assert!(mmap.get_slot(&0).is_none());
@@ -524,7 +512,7 @@ mod tests {
             .unwrap();
         let path = file.path();
 
-        let mmap = SlottedPageMmap::new(path, None);
+        let mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
         let values = mmap.all_values();
         assert_eq!(values.len(), 0);
 
@@ -541,9 +529,9 @@ mod tests {
             free_space = new_free_space;
         }
 
-        let expected_slot_count = 220_752;
+        let expected_slot_count = 13_796;
         assert_eq!(mmap.header.slot_count, expected_slot_count);
-        assert_eq!(mmap.free_space(), 104); // not enough space for a new slot + placeholder value
+        assert_eq!(mmap.free_space(), 136); // not enough space for a new slot + placeholder value
 
         // can't add more values
         assert_eq!(
@@ -555,7 +543,7 @@ mod tests {
         drop(mmap);
         let mmap = SlottedPageMmap::open(path).unwrap();
         assert_eq!(mmap.header.slot_count, expected_slot_count);
-        assert_eq!(mmap.header.data_start_offset, 5_298_176);
+        assert_eq!(mmap.header.data_start_offset, 331_264);
 
         assert_eq!(mmap.all_values().len(), expected_slot_count as usize);
         assert_eq!(mmap.non_deleted_values().len(), 0);
@@ -570,7 +558,7 @@ mod tests {
             .unwrap();
         let path = file.path();
 
-        let mut mmap = SlottedPageMmap::new(path, None);
+        let mut mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
         let values = mmap.all_values();
         assert_eq!(values.len(), 0);
 
@@ -580,21 +568,21 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 10);
-        assert_eq!(mmap.free_space(), 33_552_888);
+        assert_eq!(mmap.free_space(), 2_095_608);
 
         // read slots
         let slot = mmap.get_slot(&0).unwrap();
-        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.offset, 2_097_024);
         assert_eq!(slot.length, 128);
         assert_eq!(mmap.get_slot_value(&slot), None);
 
         let slot = mmap.get_slot(&1).unwrap();
-        assert_eq!(slot.offset, 33_554_176);
+        assert_eq!(slot.offset, 2_096_896);
         assert_eq!(slot.length, 128);
         assert_eq!(mmap.get_slot_value(&slot), None);
 
         let slot = mmap.get_slot(&2).unwrap();
-        assert_eq!(slot.offset, 33_554_048);
+        assert_eq!(slot.offset, 2_096_768);
         assert_eq!(slot.length, 128);
         assert_eq!(mmap.get_slot_value(&slot), None);
 
@@ -611,7 +599,7 @@ mod tests {
             .unwrap();
         let path = file.path();
 
-        let mut mmap = SlottedPageMmap::new(path, None);
+        let mut mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
         let values = mmap.all_values();
         assert_eq!(values.len(), 0);
 
@@ -626,25 +614,25 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 100);
-        assert_eq!(mmap.free_space(), 33_539_208);
+        assert_eq!(mmap.free_space(), 2_081_928);
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
-        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.offset, 2_097_024);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 0, qux: true };
         let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         let slot = mmap.get_slot(&1).unwrap();
-        assert_eq!(slot.offset, 33_554_176);
+        assert_eq!(slot.offset, 2_096_896);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 1, qux: false };
         let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, expected);
 
         let slot = mmap.get_slot(&2).unwrap();
-        assert_eq!(slot.offset, 33_554_048);
+        assert_eq!(slot.offset, 2_096_768);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 2, qux: true };
         let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
@@ -663,7 +651,7 @@ mod tests {
             .unwrap();
         let path = file.path();
 
-        let mut mmap = SlottedPageMmap::new(path, None);
+        let mut mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
 
         // add 100 placeholder values
         for i in 0..100 {
@@ -693,7 +681,7 @@ mod tests {
             .unwrap();
         let path = file.path();
 
-        let mut mmap = SlottedPageMmap::new(path, None);
+        let mut mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
         let values = mmap.all_values();
         assert_eq!(values.len(), 0);
 
@@ -703,7 +691,7 @@ mod tests {
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
-        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.offset, 2_097_024);
         assert_eq!(slot.length, 128);
         let expected = Foo { bar: 1, qux: true };
         let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
@@ -729,7 +717,7 @@ mod tests {
             .unwrap();
         let path = file.path();
 
-        let mut mmap = SlottedPageMmap::new(path, None);
+        let mut mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
         let values = mmap.all_values();
         assert_eq!(values.len(), 0);
 
@@ -740,7 +728,7 @@ mod tests {
         assert_eq!(mmap.get_value(&0), None);
 
         let slot = mmap.get_slot(&0).unwrap();
-        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.offset, 2_097_024);
         assert_eq!(slot.length, 128);
 
         // update value from placeholder
@@ -750,7 +738,7 @@ mod tests {
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
-        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.offset, 2_097_024);
         assert_eq!(slot.length, 128);
         let actual = Foo::from_bytes(mmap.get_slot_value(&slot).unwrap());
         assert_eq!(actual, foo);
@@ -765,7 +753,7 @@ mod tests {
             .unwrap();
         let path = file.path();
 
-        let mut mmap = SlottedPageMmap::new(path, None);
+        let mut mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
         let values = mmap.all_values();
         assert_eq!(values.len(), 0);
 
@@ -776,7 +764,7 @@ mod tests {
         assert_eq!(mmap.get_value(&0), None);
 
         let slot = mmap.get_slot(&0).unwrap();
-        assert_eq!(slot.offset, 33_554_304);
+        assert_eq!(slot.offset, 2097024);
         assert_eq!(slot.length, 128);
 
         // create random slice larger than the placeholder value
@@ -802,7 +790,7 @@ mod tests {
             .unwrap();
         let path = file.path();
 
-        let mut mmap = SlottedPageMmap::new(path, None);
+        let mut mmap = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
 
         let big_value = [1; 200];
         for i in 0..500 {
@@ -845,7 +833,7 @@ mod tests {
     #[test]
     fn test_page_size_for_value() {
         let value_size = 128;
-        let page_size = SlottedPageMmap::page_size_for_value(value_size);
+        let page_size = SlottedPageMmap::new_page_size_for_value(value_size);
         assert_eq!(
             page_size,
             128 + SlotHeader::size_in_bytes() + SlotHeader::size_in_bytes()
