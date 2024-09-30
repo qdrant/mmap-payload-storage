@@ -11,12 +11,16 @@ use std::sync::Arc;
 
 pub struct PayloadStorage {
     page_tracker: RwLock<PageTracker>,
+    new_page_size: usize, // page size in bytes when creating new pages
     pages: HashMap<u32, Arc<RwLock<SlottedPageMmap>>>, // page_id -> mmap page
     max_page_id: u32,
     base_path: PathBuf,
 }
 
 impl PayloadStorage {
+    /// Default page size used when not specified
+    const DEFAULT_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
+
     /// LZ4 compression
     fn compress(value: &[u8]) -> Vec<u8> {
         compress_prepend_size(value)
@@ -27,9 +31,10 @@ impl PayloadStorage {
         lz4_flex::decompress_size_prepended(value).unwrap()
     }
 
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
         Self {
             page_tracker: RwLock::new(PageTracker::new(&path, None)),
+            new_page_size: page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages: HashMap::new(),
             max_page_id: 0,
             base_path: path,
@@ -38,7 +43,7 @@ impl PayloadStorage {
 
     /// Open an existing PayloadStorage at the given path
     /// Returns None if the storage does not exist
-    pub fn open(path: PathBuf) -> Option<Self> {
+    pub fn open(path: PathBuf, new_page_size: Option<usize>) -> Option<Self> {
         let page_tracker = PageTracker::open(&path)?;
         let page_ids = page_tracker.all_page_ids();
         // load pages
@@ -55,6 +60,7 @@ impl PayloadStorage {
         }
         Some(Self {
             page_tracker: RwLock::new(page_tracker),
+            new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages,
             max_page_id,
             base_path: path,
@@ -105,14 +111,14 @@ impl PayloadStorage {
         if self.pages.is_empty() {
             return None;
         }
-        let needed_size =
-            SlottedPageMmap::MIN_VALUE_SIZE_BYTES.max(payload_size) + SlotHeader::size_in_bytes();
+        let needed_size = SlottedPageMmap::required_size_for_value(payload_size);
         let mut best_page = 0;
         // best is the page with the lowest free space that fits the payload
         let mut best_fit_size = usize::MAX;
 
         for (page_id, page) in &self.pages {
             let free_space = page.read().free_space();
+            // select the smallest page that fits the payload
             if free_space >= needed_size && free_space < best_fit_size {
                 best_page = *page_id;
                 best_fit_size = free_space;
@@ -128,12 +134,13 @@ impl PayloadStorage {
     }
 
     /// Create a new page and return its id.
+    /// If size is None, the page will have the default size
     ///
-    /// `size_hint` is used to create larger pages if necessary.
-    fn create_new_page(&mut self, size_hint: Option<usize>) -> u32 {
+    /// Returns the new page id
+    fn create_new_page(&mut self, size: usize) -> u32 {
         let new_page_id = self.max_page_id + 1;
         let path = self.page_path(new_page_id);
-        let was_created = self.add_page(new_page_id, SlottedPageMmap::new(&path, size_hint));
+        let was_created = self.add_page(new_page_id, SlottedPageMmap::new(&path, size));
 
         assert!(was_created);
 
@@ -141,9 +148,12 @@ impl PayloadStorage {
     }
 
     /// Create a new page adapted to the payload size and return its id.
+    /// The page size will be the next power of two of the payload size, with a minimum of `self.page_size`.
     fn create_new_page_for_payload(&mut self, payload_size: usize) -> u32 {
-        let size_hint = SlottedPageMmap::page_size_for_value(payload_size);
-        self.create_new_page(Some(size_hint))
+        let required_size = SlottedPageMmap::new_page_size_for_value(payload_size);
+        // return the smallest power of two greater than or equal to the required size if it is greater than the default page size
+        let real_size = self.new_page_size.max(required_size).next_power_of_two();
+        self.create_new_page(real_size)
     }
 
     /// Get the mapping for a given point offset
@@ -190,7 +200,6 @@ impl PayloadStorage {
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
-
             let slot_id = page
                 .write()
                 .insert_value(point_offset, &comp_payload)
@@ -256,7 +265,7 @@ impl PayloadStorage {
 
         // TODO: account for the fact that the first value could be larger than 32MB and the newly created page will
         // immediately not be used? we don't want to create empty pages. But it is a quite rare case, so maybe we can just ignore it
-        let mut size_hint = None;
+        let mut size_hint = Self::DEFAULT_PAGE_SIZE_BYTES;
 
         // This is a loop because we might need to create more pages if the current new page is full
         'new_page: loop {
@@ -327,14 +336,21 @@ impl PayloadStorage {
         new_page_id: PageId,
         from_slot_id: SlotId,
         page_tracker: &mut PageTracker,
-    ) -> ControlFlow<(SlotId, Option<usize>), ()> {
+    ) -> ControlFlow<(SlotId, usize), ()> {
         let mut current_slot_id = from_slot_id;
 
         let old_page = self.pages.get(&old_page_id).unwrap().read();
         let mut new_page = self.pages.get(&new_page_id).unwrap().write();
 
         for (slot, value) in old_page.iter_slot_values_starting_from(current_slot_id) {
-            match Self::move_value(slot, value, &mut new_page, new_page_id, page_tracker) {
+            match Self::move_value(
+                slot,
+                value,
+                &mut new_page,
+                new_page_id,
+                self.new_page_size,
+                page_tracker,
+            ) {
                 ControlFlow::Break(size_hint) => {
                     return ControlFlow::Break((current_slot_id, size_hint))
                 }
@@ -356,8 +372,9 @@ impl PayloadStorage {
         value: Option<&[u8]>,
         new_page: &mut SlottedPageMmap,
         new_page_id: PageId,
+        page_size: usize,
         page_tracker: &mut PageTracker,
-    ) -> ControlFlow<Option<usize>, ()> {
+    ) -> ControlFlow<usize, ()> {
         let point_offset = current_slot.point_offset();
 
         if current_slot.deleted() {
@@ -373,7 +390,7 @@ impl PayloadStorage {
 
         let Some(slot_id) = was_inserted else {
             // new page is full, request to create a new one
-            let size_hint = value.map(|v| v.len());
+            let size_hint = value.map(|v| v.len()).unwrap_or(page_size);
             return ControlFlow::Break(size_hint);
         };
 
@@ -394,8 +411,9 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    use crate::fixtures::{empty_storage, one_random_payload_please, HM_FIELDS};
+    use crate::fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS};
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
+    use rstest::rstest;
     use tempfile::Builder;
 
     #[test]
@@ -448,7 +466,7 @@ mod tests {
         let rng = &mut rand::thread_rng();
 
         let mut payloads = (0..100000u32)
-            .map(|point_offset| (point_offset, one_random_payload_please(rng, 2)))
+            .map(|point_offset| (point_offset, random_payload(rng, 2)))
             .collect::<Vec<_>>();
 
         for (point_offset, payload) in payloads.iter() {
@@ -546,13 +564,13 @@ mod tests {
             match operation {
                 0 => {
                     let size_factor = rng.gen_range(1..10);
-                    let payload = one_random_payload_please(rng, size_factor);
+                    let payload = random_payload(rng, size_factor);
                     Operation::Put(point_offset, payload)
                 }
                 1 => Operation::Delete(point_offset),
                 2 => {
                     let size_factor = rng.gen_range(1..10);
-                    let payload = one_random_payload_please(rng, size_factor);
+                    let payload = random_payload(rng, size_factor);
                     Operation::Update(point_offset, payload)
                 }
                 _ => unreachable!(),
@@ -560,9 +578,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_behave_like_hashmap() {
-        let (dir, mut storage) = empty_storage();
+    #[rstest]
+    fn test_behave_like_hashmap(#[values(10, 10_000, 32_000_000)] page_size: usize) {
+        let (dir, mut storage) = empty_storage_sized(page_size);
 
         let rng = &mut rand::thread_rng();
         let max_point_offset = 100000u32;
@@ -608,7 +626,7 @@ mod tests {
         drop(storage);
 
         // reopen storage
-        let storage = PayloadStorage::open(dir.path().to_path_buf()).unwrap();
+        let storage = PayloadStorage::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
 
         // asset same length
         assert_eq!(
@@ -707,7 +725,7 @@ mod tests {
             .insert("key".to_string(), Value::String("value".to_string()));
 
         {
-            let mut storage = PayloadStorage::new(path.clone());
+            let mut storage = PayloadStorage::new(path.clone(), None);
 
             storage.put_payload(0, payload.clone());
             assert_eq!(storage.pages.len(), 1);
@@ -725,7 +743,7 @@ mod tests {
         }
 
         // reopen storage
-        let storage = PayloadStorage::open(path.clone()).unwrap();
+        let storage = PayloadStorage::open(path.clone(), None).unwrap();
         assert_eq!(storage.pages.len(), 1);
 
         let stored_payload = storage.get_payload(0);
@@ -809,7 +827,7 @@ mod tests {
         drop(storage);
 
         // reopen storage
-        let mut storage = PayloadStorage::open(dir.path().to_path_buf()).unwrap();
+        let mut storage = PayloadStorage::open(dir.path().to_path_buf(), None).unwrap();
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 3);
         assert_eq!(storage.page_tracker.read().mapping_len(), EXPECTED_LEN * 2);
@@ -844,7 +862,7 @@ mod tests {
         let max_point_offset = 20000;
 
         let large_payloads = (0..max_point_offset)
-            .map(|_| one_random_payload_please(rng, 10))
+            .map(|_| random_payload(rng, 10))
             .collect::<Vec<_>>();
 
         for (i, payload) in large_payloads.iter().enumerate() {
@@ -864,7 +882,7 @@ mod tests {
 
         // update with smaller values
         let small_payloads = (0..max_point_offset)
-            .map(|_| one_random_payload_please(rng, 1))
+            .map(|_| random_payload(rng, 1))
             .collect::<Vec<_>>();
 
         for (i, payload) in small_payloads.iter().enumerate() {
@@ -896,7 +914,7 @@ mod tests {
 
     #[test]
     fn test_payload_compression() {
-        let payload = one_random_payload_please(&mut rand::thread_rng(), 2);
+        let payload = random_payload(&mut rand::thread_rng(), 2);
         let payload_bytes = payload.to_bytes();
         let compressed = PayloadStorage::compress(&payload_bytes);
         let decompressed = PayloadStorage::decompress(&compressed);

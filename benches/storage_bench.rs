@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use mmap_payload_storage::fixtures::{empty_storage, one_random_payload_please, HM_FIELDS};
+use mmap_payload_storage::fixtures::{empty_storage, random_payload, HM_FIELDS};
 use mmap_payload_storage::payload::Payload;
 use serde_json::Value;
 
@@ -10,7 +10,7 @@ pub fn random_data_bench(c: &mut Criterion) {
     let (_dir, mut storage) = empty_storage();
     let mut rng = rand::thread_rng();
     c.bench_function("write random payload", |b| {
-        let payload = one_random_payload_please(&mut rng, 5);
+        let payload = random_payload(&mut rng, 5);
         b.iter(|| {
             for i in 0..PAYLOAD_COUNT {
                 storage.put_payload(i as u32, payload.clone());

@@ -16,16 +16,20 @@ New experimental storage for vector payloads using mmap.
   - can be done in place if the new value fits
   - otherwise, the old value is marked as deleted and a new value is inserted
   - if the value is smaller, the container is shrunk down to at least the min size
+- Supports multiple threads reading and single thread writing
 
 ![Slotted Page](./slotted%20pages.svg)
 
 ## TODOs
 
+- [ ] compact on write
+- [ ] reuse deleted slots on write
 - [ ] non write blocking compaction
 - [ ] benchmarking with realistic data payload (CPU + memory usage)
 - [ ] run unit tests different page sizes
 - [ ] test best fitting page logic
 - [ ] test data consistency on panic
+- [ ] test new payload storage vs Rockdb equivalent (speed & storage size)
 - [ ] dictionary compression to optimize payload key repetition
 - [ ] validate the usage with a block storage via HTTP range requests
 - [ ] handle all surviving mutants
