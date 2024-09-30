@@ -1,13 +1,11 @@
-use crate::page_tracker::{PageId, PagePointer, PageTracker, PointOffset};
+use crate::page_tracker::{OffsetsToSlots, PageId, PagePointer, PageTracker, PointOffset};
 use crate::payload::Payload;
 use crate::slotted_page::{SlotHeader, SlotId, SlottedPageMmap};
 use lz4_flex::compress_prepend_size;
-use parking_lot::RwLock;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 pub struct PayloadStorage {
     page_tracker: PageTracker,
@@ -58,7 +56,7 @@ impl PayloadStorage {
             }
         }
         Some(Self {
-            page_tracker: page_tracker,
+            page_tracker,
             new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages,
             max_page_id,
@@ -264,7 +262,7 @@ impl PayloadStorage {
             let mut new_page = SlottedPageMmap::new(&self.page_path(new_page_id), size_hint);
 
             let mut pages_to_remove = Vec::new();
-            let mut slots_to_update = Vec::new();
+            let mut slots_to_update: OffsetsToSlots = Vec::new();
             // go over each page to defrag
             'defrag_pages: loop {
                 match self.transfer_page_values(old_page_id, &mut new_page, last_slot_id) {
@@ -313,8 +311,7 @@ impl PayloadStorage {
         old_page_id: PageId,
         new_page: &mut SlottedPageMmap,
         from_slot_id: SlotId,
-    ) -> ControlFlow<(Vec<(PointOffset, SlotId)>, SlotId, Option<usize>), Vec<(PointOffset, SlotId)>>
-    {
+    ) -> ControlFlow<(OffsetsToSlots, SlotId, Option<usize>), OffsetsToSlots> {
         let mut current_slot_id = from_slot_id;
 
         let old_page = self.pages.get(&old_page_id).unwrap();
