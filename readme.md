@@ -22,9 +22,11 @@ New experimental storage for vector payloads using mmap.
 
 ## TODOs
 
-- [ ] compact on write
-- [ ] reuse deleted slots on write
+- [ ] reuse deleted slots on write (very nice to have)
 - [ ] test best fitting page logic
+- [ ] add to page header defragmentation stats
+- [ ] improve page selection on write (maybe binary search)
+- [ ] report storage wide fragmentation stats (for optimizer)
 - [ ] test data consistency on panic
 - [ ] test new payload storage vs RocksDB equivalent (speed & storage size)
 - [ ] dictionary compression to optimize payload key repetition
