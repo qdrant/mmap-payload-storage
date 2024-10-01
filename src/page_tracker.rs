@@ -4,7 +4,6 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub type PointOffset = u32;
@@ -31,10 +30,9 @@ struct PageTrackerHeader {
 }
 
 pub struct PageTracker {
-    path: PathBuf,                     // path to the file
-    mapping: Vec<Option<PagePointer>>, // points_offsets are contiguous
-    header: PageTrackerHeader,         // header of the file
-    mmap: MmapMut,                     // mmap of the file
+    path: PathBuf,             // path to the file
+    header: PageTrackerHeader, // header of the file
+    mmap: MmapMut,             // mmap of the file
 }
 
 impl PageTracker {
@@ -53,12 +51,7 @@ impl PageTracker {
         create_and_ensure_length(&path, size).unwrap();
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header = PageTrackerHeader::default();
-        let mut page_tracker = Self {
-            path,
-            mapping: Vec::new(),
-            header,
-            mmap,
-        };
+        let mut page_tracker = Self { path, header, mmap };
         page_tracker.write_header();
         page_tracker
     }
@@ -73,18 +66,8 @@ impl PageTracker {
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal)).unwrap();
         let header: &PageTrackerHeader =
             transmute_from_u8(&mmap[0..size_of::<PageTrackerHeader>()]);
-        let mut mapping = Vec::with_capacity(header.max_point_offset as usize);
-        for i in 0..header.max_point_offset {
-            let start_offset =
-                size_of::<PageTrackerHeader>() + i as usize * size_of::<Option<PagePointer>>();
-            let end_offset = start_offset + size_of::<Option<PagePointer>>();
-            let page_pointer: &Option<PagePointer> =
-                transmute_from_u8(&mmap[start_offset..end_offset]);
-            mapping.push(*page_pointer);
-        }
         Some(Self {
             path,
-            mapping,
             header: header.clone(),
             mmap,
         })
@@ -95,11 +78,19 @@ impl PageTracker {
         self.mmap.len()
     }
 
-    pub fn all_page_ids(&self) -> HashSet<PageId> {
-        self.mapping
-            .iter()
-            .filter_map(|x| x.map(|y| y.page_id))
-            .collect()
+    pub fn all_page_ids(&self) -> Vec<PageId> {
+        let mut page_ids = vec![];
+        for i in 0..self.header.max_point_offset {
+            let start_offset =
+                size_of::<PageTrackerHeader>() + i as usize * size_of::<Option<PagePointer>>();
+            let end_offset = start_offset + size_of::<Option<PagePointer>>();
+            let page_pointer: &Option<PagePointer> =
+                transmute_from_u8(&self.mmap[start_offset..end_offset]);
+            if let Some(page_pointer) = page_pointer {
+                page_ids.push(page_pointer.page_id);
+            }
+        }
+        page_ids
     }
 
     pub fn header_count(&self) -> u32 {
@@ -113,9 +104,8 @@ impl PageTracker {
 
     /// Save the mapping at the given offset
     /// The file is resized if necessary
-    fn persist_pointer(&mut self, point_offset: PointOffset) {
+    fn persist_pointer(&mut self, point_offset: PointOffset, pointer: Option<PagePointer>) {
         let point_offset = point_offset as usize;
-        let pointer = self.mapping[point_offset];
         let start_offset =
             size_of::<PageTrackerHeader>() + point_offset * size_of::<Option<PagePointer>>();
         let end_offset = start_offset + size_of::<Option<PagePointer>>();
@@ -134,34 +124,30 @@ impl PageTracker {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.mapping.is_empty()
-    }
-
-    /// Get the length of the mapping
-    /// Includes None values
-    pub fn raw_mapping_len(&self) -> usize {
-        self.mapping.len()
+        self.mapping_len() == 0
     }
 
     /// Get the length of the mapping
     /// Excludes None values
-    #[cfg(test)]
     pub fn mapping_len(&self) -> usize {
-        self.mapping.iter().filter(|x| x.is_some()).count()
+        self.all_page_ids().len()
     }
 
     /// Get the raw value at the given point offset
-    /// For testing purposes
-    #[cfg(test)]
     fn get_raw(&self, point_offset: PointOffset) -> Option<&Option<PagePointer>> {
-        self.mapping.get(point_offset as usize)
+        let start_offset = size_of::<PageTrackerHeader>()
+            + point_offset as usize * size_of::<Option<PagePointer>>();
+        let end_offset = start_offset + size_of::<Option<PagePointer>>();
+        if end_offset > self.mmap.len() {
+            return None;
+        }
+        let page_pointer = transmute_from_u8(&self.mmap[start_offset..end_offset]);
+        Some(page_pointer)
     }
 
     /// Get the page pointer at the given point offset
-    pub fn get(&self, point_offset: PointOffset) -> Option<&PagePointer> {
-        self.mapping
-            .get(point_offset as usize)
-            .and_then(|x| x.as_ref())
+    pub fn get(&self, point_offset: PointOffset) -> Option<PagePointer> {
+        self.get_raw(point_offset).and_then(|pointer| *pointer)
     }
 
     /// Increment the header count if the given point offset is larger than the current count
@@ -175,31 +161,16 @@ impl PageTracker {
     /// Set value at the given point offset
     /// If the point offset is larger than the current length, the mapping is resized
     pub fn set(&mut self, point_offset: PointOffset, page_pointer: PagePointer) {
-        // save in memory mapping vector
-        self.ensure_mapping_length(point_offset as usize + 1);
-        self.mapping[point_offset as usize] = Some(page_pointer);
         // save mapping to mmap
-        self.persist_pointer(point_offset);
+        self.persist_pointer(point_offset, Some(page_pointer));
         // increment header count if necessary
         self.increment_max_point_offset(point_offset);
     }
 
     pub fn unset(&mut self, point_offset: PointOffset) {
-        if point_offset < self.mapping.len() as u32 {
-            // clear in memory mapping vector
-            self.mapping[point_offset as usize] = None;
+        if (point_offset as usize) < self.mmap.len() {
             // save mapping to mmap
-            self.persist_pointer(point_offset);
-        }
-    }
-
-    fn resize_mapping(&mut self, new_len: usize) {
-        self.mapping.resize_with(new_len, || None);
-    }
-
-    fn ensure_mapping_length(&mut self, new_len: usize) {
-        if self.mapping.len() < new_len {
-            self.resize_mapping(new_len);
+            self.persist_pointer(point_offset, None);
         }
     }
 }
@@ -216,7 +187,6 @@ mod tests {
         let path = file.path();
         let tracker = PageTracker::new(path, None);
         assert!(tracker.is_empty());
-        assert_eq!(tracker.raw_mapping_len(), 0);
         assert_eq!(tracker.mapping_len(), 0);
         assert_eq!(tracker.header_count(), 0);
         assert_eq!(tracker.all_page_ids().len(), 0);
@@ -234,11 +204,10 @@ mod tests {
         tracker.set(0, PagePointer::new(1, 1));
 
         assert!(!tracker.is_empty());
-        assert_eq!(tracker.raw_mapping_len(), 1);
         assert_eq!(tracker.mapping_len(), 1);
 
         tracker.set(100, PagePointer::new(2, 2));
-        assert_eq!(tracker.raw_mapping_len(), 101);
+        assert_eq!(tracker.header_count(), 101);
         assert_eq!(tracker.mapping_len(), 2);
     }
 
@@ -257,15 +226,14 @@ mod tests {
 
         assert!(!tracker.is_empty());
         assert_eq!(tracker.mapping_len(), 4);
-        assert_eq!(tracker.raw_mapping_len(), 11); // accounts for empty slots
-        assert_eq!(tracker.header_count(), 11);
+        assert_eq!(tracker.header_count(), 11); // accounts for empty slots
 
         assert_eq!(tracker.get_raw(0), Some(&Some(PagePointer::new(1, 1))));
         assert_eq!(tracker.get_raw(1), Some(&Some(PagePointer::new(2, 2))));
         assert_eq!(tracker.get_raw(2), Some(&Some(PagePointer::new(3, 3))));
         assert_eq!(tracker.get_raw(3), Some(&None)); // intermediate empty slot
         assert_eq!(tracker.get_raw(10), Some(&Some(PagePointer::new(10, 10))));
-        assert_eq!(tracker.get_raw(1000), None); // out of bounds
+        assert_eq!(tracker.get_raw(100_000), None); // out of bounds
 
         tracker.unset(1);
         // the value has been cleared but the entry is still there
@@ -273,15 +241,14 @@ mod tests {
         assert_eq!(tracker.get(1), None);
 
         assert_eq!(tracker.mapping_len(), 3);
-        assert_eq!(tracker.raw_mapping_len(), 11);
         assert_eq!(tracker.header_count(), 11);
 
         // overwrite some values
         tracker.set(0, PagePointer::new(10, 10));
         tracker.set(2, PagePointer::new(30, 30));
 
-        assert_eq!(tracker.get(0), Some(&PagePointer::new(10, 10)));
-        assert_eq!(tracker.get(2), Some(&PagePointer::new(30, 30)));
+        assert_eq!(tracker.get(0), Some(PagePointer::new(10, 10)));
+        assert_eq!(tracker.get(2), Some(PagePointer::new(30, 30)));
     }
 
     #[rstest]
@@ -304,7 +271,6 @@ mod tests {
         }
 
         assert_eq!(tracker.mapping_len(), value_count / 2);
-        assert_eq!(tracker.raw_mapping_len(), value_count - 1);
         assert_eq!(tracker.header_count(), value_count as u32 - 1);
 
         // drop the tracker
@@ -313,7 +279,6 @@ mod tests {
         // reopen the tracker
         let tracker = PageTracker::open(path).unwrap();
         assert_eq!(tracker.mapping_len(), value_count / 2);
-        assert_eq!(tracker.raw_mapping_len(), value_count - 1);
         assert_eq!(tracker.header_count(), value_count as u32 - 1);
 
         // check the values
@@ -321,7 +286,7 @@ mod tests {
             if i % 2 == 0 {
                 assert_eq!(
                     tracker.get(i as u32),
-                    Some(&PagePointer::new(i as u32, i as u32))
+                    Some(PagePointer::new(i as u32, i as u32))
                 );
             } else {
                 assert_eq!(tracker.get(i as u32), None);
@@ -360,6 +325,6 @@ mod tests {
         let key = 1_000_000;
 
         tracker.set(key, page_pointer);
-        assert_eq!(tracker.get(key), Some(&page_pointer));
+        assert_eq!(tracker.get(key), Some(page_pointer));
     }
 }
