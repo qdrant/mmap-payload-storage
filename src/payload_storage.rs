@@ -158,7 +158,7 @@ impl PayloadStorage {
     }
 
     /// Put a payload in the storage
-    pub fn put_payload(&mut self, point_offset: PointOffset, payload: Payload) {
+    pub fn put_payload(&mut self, point_offset: PointOffset, payload: &Payload) {
         let payload_bytes = payload.to_bytes();
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
@@ -407,7 +407,7 @@ mod tests {
         let (_dir, mut storage) = empty_storage();
 
         let payload = Payload::default();
-        storage.put_payload(0, payload);
+        storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
 
@@ -425,7 +425,7 @@ mod tests {
             .0
             .insert("key".to_string(), Value::String("value".to_string()));
 
-        storage.put_payload(0, payload.clone());
+        storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
 
@@ -449,7 +449,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for (point_offset, payload) in payloads.iter() {
-            storage.put_payload(*point_offset, payload.clone());
+            storage.put_payload(*point_offset, payload);
 
             let stored_payload = storage.get_payload(*point_offset);
             assert!(stored_payload.is_some());
@@ -474,7 +474,7 @@ mod tests {
             .0
             .insert("key".to_string(), Value::String("value".to_string()));
 
-        storage.put_payload(0, payload.clone());
+        storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
@@ -503,7 +503,7 @@ mod tests {
             .0
             .insert("key".to_string(), Value::String("value".to_string()));
 
-        storage.put_payload(0, payload.clone());
+        storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
 
@@ -521,7 +521,7 @@ mod tests {
             .0
             .insert("key".to_string(), Value::String("updated".to_string()));
 
-        storage.put_payload(0, updated_payload.clone());
+        storage.put_payload(0, &updated_payload);
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
 
@@ -571,19 +571,19 @@ mod tests {
             .collect::<Vec<_>>();
 
         // apply operations to storage and model_hashmap
-        for operation in operations.iter() {
+        for operation in operations.into_iter() {
             match operation {
                 Operation::Put(point_offset, payload) => {
-                    storage.put_payload(*point_offset, payload.clone());
-                    model_hashmap.insert(*point_offset, payload.clone());
+                    storage.put_payload(point_offset, &payload);
+                    model_hashmap.insert(point_offset, payload);
                 }
                 Operation::Delete(point_offset) => {
-                    storage.delete_payload(*point_offset);
-                    model_hashmap.remove(point_offset);
+                    storage.delete_payload(point_offset);
+                    model_hashmap.remove(&point_offset);
                 }
                 Operation::Update(point_offset, payload) => {
-                    storage.put_payload(*point_offset, payload.clone());
-                    model_hashmap.insert(*point_offset, payload.clone());
+                    storage.put_payload(point_offset, &payload);
+                    model_hashmap.insert(point_offset, payload);
                 }
             }
         }
@@ -637,7 +637,7 @@ mod tests {
         let huge_value = Value::String(distr.sample_iter(rng).take(huge_payload_size).collect());
         payload.0.insert("huge".to_string(), huge_value);
 
-        storage.put_payload(0, payload.clone());
+        storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
@@ -700,7 +700,7 @@ mod tests {
         {
             let mut storage = PayloadStorage::new(path.clone(), None);
 
-            storage.put_payload(0, payload.clone());
+            storage.put_payload(0, &payload);
             assert_eq!(storage.pages.len(), 1);
 
             let page_mapping = storage.get_pointer(0).unwrap();
@@ -741,7 +741,7 @@ mod tests {
                         Value::String(record.get(i).unwrap().to_string()),
                     );
                 }
-                storage.put_payload(point_offset, payload);
+                storage.put_payload(point_offset, &payload);
                 point_offset += 1;
             }
             point_offset
@@ -812,9 +812,9 @@ mod tests {
         for i in (0..EXPECTED_LEN).rev() {
             let payload = storage.get_payload(i as u32).unwrap();
             // move first write to the right
-            storage.put_payload(i as u32 + offset, payload.clone());
+            storage.put_payload(i as u32 + offset, &payload);
             // move second write to the right
-            storage.put_payload(i as u32 + offset + EXPECTED_LEN as u32, payload);
+            storage.put_payload(i as u32 + offset + EXPECTED_LEN as u32, &payload);
         }
 
         // assert storage is consistent after updating
@@ -833,7 +833,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for (i, payload) in large_payloads.iter().enumerate() {
-            storage.put_payload(i as u32, payload.clone());
+            storage.put_payload(i as u32, payload);
         }
 
         // sanity check
@@ -853,7 +853,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for (i, payload) in small_payloads.iter().enumerate() {
-            storage.put_payload(i as u32, payload.clone());
+            storage.put_payload(i as u32, payload);
         }
 
         // sanity check

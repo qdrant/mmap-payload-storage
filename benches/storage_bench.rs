@@ -4,7 +4,7 @@ use mmap_payload_storage::payload::Payload;
 use serde_json::Value;
 
 /// sized similarly to the real dataset for a fair comparison
-const PAYLOAD_COUNT: usize = 100_000;
+const PAYLOAD_COUNT: u32 = 100_000;
 
 pub fn random_data_bench(c: &mut Criterion) {
     let (_dir, mut storage) = empty_storage();
@@ -13,7 +13,7 @@ pub fn random_data_bench(c: &mut Criterion) {
         let payload = random_payload(&mut rng, 5);
         b.iter(|| {
             for i in 0..PAYLOAD_COUNT {
-                storage.put_payload(i as u32, payload.clone());
+                storage.put_payload(i, &payload);
             }
         });
     });
@@ -21,7 +21,7 @@ pub fn random_data_bench(c: &mut Criterion) {
     c.bench_function("read random payload", |b| {
         b.iter(|| {
             for i in 0..PAYLOAD_COUNT {
-                let res = storage.get_payload(i as u32);
+                let res = storage.get_payload(i);
                 assert!(res.is_some());
             }
         });
@@ -46,7 +46,7 @@ pub fn real_data_data_bench(c: &mut Criterion) {
                         Value::String(record.get(i).unwrap().to_string()),
                     );
                 }
-                storage.put_payload(point_offset, payload);
+                storage.put_payload(point_offset, &payload);
                 point_offset += 1;
             }
         });
@@ -56,7 +56,7 @@ pub fn real_data_data_bench(c: &mut Criterion) {
     c.bench_function("read real payload", |b| {
         b.iter(|| {
             for i in 0..point_offset {
-                let res = storage.get_payload(i as u32).unwrap();
+                let res = storage.get_payload(i).unwrap();
                 assert!(res.0.contains_key("article_id"));
             }
         });
