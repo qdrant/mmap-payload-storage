@@ -113,7 +113,8 @@ impl PageTracker {
 
     /// Save the mapping at the given offset
     /// The file is resized if necessary
-    fn persist_pointer(&mut self, point_offset: usize) {
+    fn persist_pointer(&mut self, point_offset: PointOffset) {
+        let point_offset = point_offset as usize;
         let start =
             size_of::<PageTrackerHeader>() + point_offset * size_of::<Option<PagePointer>>();
         // check if file is long enough
@@ -149,12 +150,12 @@ impl PageTracker {
     /// Get the raw value at the given point offset
     /// For testing purposes
     #[cfg(test)]
-    fn get_raw(&self, point_offset: u32) -> Option<&Option<PagePointer>> {
+    fn get_raw(&self, point_offset: PointOffset) -> Option<&Option<PagePointer>> {
         self.mapping.get(point_offset as usize)
     }
 
     /// Get the page pointer at the given point offset
-    pub fn get(&self, point_offset: u32) -> Option<&PagePointer> {
+    pub fn get(&self, point_offset: PointOffset) -> Option<&PagePointer> {
         self.mapping
             .get(point_offset as usize)
             .and_then(|x| x.as_ref())
@@ -170,22 +171,20 @@ impl PageTracker {
 
     /// Set value at the given point offset
     /// If the point offset is larger than the current length, the mapping is resized
-    pub fn set(&mut self, point_offset: u32, page_pointer: PagePointer) {
-        let point_offset = point_offset as usize;
+    pub fn set(&mut self, point_offset: PointOffset, page_pointer: PagePointer) {
         // save in memory mapping vector
-        self.ensure_mapping_length(point_offset + 1);
-        self.mapping[point_offset] = Some(page_pointer);
+        self.ensure_mapping_length(point_offset as usize + 1);
+        self.mapping[point_offset as usize] = Some(page_pointer);
         // save mapping to mmap
         self.persist_pointer(point_offset);
         // increment header count if necessary
-        self.increment_max_point_offset(point_offset as u32);
+        self.increment_max_point_offset(point_offset);
     }
 
-    pub fn unset(&mut self, point_offset: u32) {
-        let point_offset = point_offset as usize;
-        if point_offset < self.mapping.len() {
+    pub fn unset(&mut self, point_offset: PointOffset) {
+        if point_offset < self.mapping.len() as u32 {
             // clear in memory mapping vector
-            self.mapping[point_offset] = None;
+            self.mapping[point_offset as usize] = None;
             // save mapping to mmap
             self.persist_pointer(point_offset);
         }

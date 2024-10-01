@@ -1,3 +1,4 @@
+use crate::page_tracker::PointOffset;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
@@ -36,12 +37,12 @@ impl SlottedPageHeader {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlotHeader {
-    offset: u64,       // offset in the page (8 bytes)
-    length: u64,       // length of the value (8 bytes)
-    point_offset: u32, // point id (4 bytes)
-    right_padding: u8, // padding within the value for small values (1 byte)
-    deleted: bool,     // whether the value has been deleted (1 byte)
-    _align: [u8; 2],   // 2 bytes padding for alignment
+    offset: u64,               // offset in the page (8 bytes)
+    length: u64,               // length of the value (8 bytes)
+    point_offset: PointOffset, // point id (4 bytes)
+    right_padding: u8,         // padding within the value for small values (1 byte)
+    deleted: bool,             // whether the value has been deleted (1 byte)
+    _align: [u8; 2],           // 2 bytes padding for alignment
 }
 
 impl SlotHeader {
@@ -51,7 +52,7 @@ impl SlotHeader {
     }
 
     fn new(
-        point_offset: u32,
+        point_offset: PointOffset,
         offset: u64,
         length: u64,
         right_padding: u8,
@@ -319,7 +320,7 @@ impl SlottedPageMmap {
     /// Returns
     /// - None if there is not enough space for a new slot + value
     /// - Some(slot_id) if the value was successfully added
-    pub fn insert_value(&mut self, point_offset: u32, value: &[u8]) -> Option<SlotId> {
+    pub fn insert_value(&mut self, point_offset: PointOffset, value: &[u8]) -> Option<SlotId> {
         // size of the value in bytes
         let real_value_size = value.len();
 
