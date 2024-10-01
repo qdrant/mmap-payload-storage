@@ -96,12 +96,16 @@ impl PayloadStorage {
 
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
+        eprintln!("pointer: {:?}", self.get_pointer(point_offset));
         let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
+        eprintln!("page: {:?}", self.pages.get(&page_id));
         let page = self.pages.get(&page_id)?;
         let page_guard = page.read();
+        eprintln!("raw value: {:?}", page_guard.get_value(&slot_id));
         let raw = page_guard.get_value(&slot_id)?;
         let decompressed = Self::decompress(raw);
         let payload = Payload::from_bytes(&decompressed);
+        eprintln!("payload: {:?}", payload);
         Some(payload)
     }
 
@@ -158,11 +162,14 @@ impl PayloadStorage {
 
     /// Get the mapping for a given point offset
     fn get_pointer(&self, point_offset: PointOffset) -> Option<PagePointer> {
-        self.page_tracker.read().get(point_offset).copied()
+        self.page_tracker.read().get(point_offset)
     }
 
     /// Put a payload in the storage
-    pub fn put_payload(&mut self, point_offset: PointOffset, payload: Payload) {
+    ///
+    /// If the payload already exists, it will be updated.
+    /// Returns true if no payload value existed for the key.
+    pub fn put_payload(&mut self, point_offset: PointOffset, payload: Payload) -> bool {
         let payload_bytes = payload.to_bytes();
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
@@ -190,6 +197,8 @@ impl PayloadStorage {
                     .write()
                     .set(point_offset, PagePointer::new(new_page_id, new_slot_id));
             }
+            // a value existed for the key
+            false
         } else {
             // this is a new payload
             let page_id = self
@@ -209,7 +218,19 @@ impl PayloadStorage {
             self.page_tracker
                 .write()
                 .set(point_offset, PagePointer::new(page_id, slot_id));
+            // a value did not exist for the key
+            true
         }
+    }
+
+    /// Update the value for key in the collection, if it exists.
+    /// Should return true if the key existed and was updated.
+    /// Should not insert the key if it did not exist.
+    pub fn update_payload(&mut self, point_offset: PointOffset, payload: Payload) -> bool {
+        if self.get_pointer(point_offset).is_none() {
+            return false;
+        }
+        self.put_payload(point_offset, payload)
     }
 
     /// Delete a payload from the storage
@@ -218,7 +239,7 @@ impl PayloadStorage {
         let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
         let page = self.pages.get_mut(&page_id)?;
         // delete value from page
-        page.write().delete_value(slot_id);
+        page.write().delete_value(slot_id)?;
         // delete mapping
         self.page_tracker.write().unset(point_offset);
         Some(())
@@ -430,7 +451,7 @@ mod tests {
         let payload = Payload::default();
         storage.put_payload(0, payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.read().raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.read().header_count(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -448,7 +469,7 @@ mod tests {
 
         storage.put_payload(0, payload.clone());
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.read().raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.read().header_count(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
@@ -465,7 +486,7 @@ mod tests {
 
         let rng = &mut rand::thread_rng();
 
-        let mut payloads = (0..100000u32)
+        let mut payloads = (0..100000u64)
             .map(|point_offset| (point_offset, random_payload(rng, 2)))
             .collect::<Vec<_>>();
 
@@ -526,7 +547,7 @@ mod tests {
 
         storage.put_payload(0, payload.clone());
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.read().raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.read().header_count(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
@@ -544,7 +565,7 @@ mod tests {
 
         storage.put_payload(0, updated_payload.clone());
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.read().raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.read().header_count(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -558,7 +579,7 @@ mod tests {
     }
 
     impl Operation {
-        fn random(rng: &mut impl Rng, max_point_offset: u32) -> Self {
+        fn random(rng: &mut impl Rng, max_point_offset: u64) -> Self {
             let point_offset = rng.gen_range(0..=max_point_offset);
             let operation = rng.gen_range(0..3);
             match operation {
@@ -583,11 +604,11 @@ mod tests {
         let (dir, mut storage) = empty_storage_sized(page_size);
 
         let rng = &mut rand::thread_rng();
-        let max_point_offset = 100000u32;
+        let max_point_offset = 100000u64;
 
         let mut model_hashmap = HashMap::new();
 
-        let operations = (0..100000u32)
+        let operations = (0..100000u64)
             .map(|_| Operation::random(rng, max_point_offset))
             .collect::<Vec<_>>();
 
@@ -753,9 +774,9 @@ mod tests {
 
     #[test]
     fn test_with_real_hm_data() {
-        const EXPECTED_LEN: usize = 105_542;
+        const EXPECTED_LEN: u64 = 105_542;
 
-        fn write_data(storage: &mut PayloadStorage, init_offset: u32) -> u32 {
+        fn write_data(storage: &mut PayloadStorage, init_offset: u64) -> u64 {
             let csv_data = include_str!("../data/h&m-articles.csv");
             let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
             let mut point_offset = init_offset;
@@ -781,10 +802,10 @@ mod tests {
             for (row_index, result) in rdr.records().enumerate() {
                 let record = result.unwrap();
                 // apply shift offset
-                let storage_index = row_index as u32 + right_shift_offset;
+                let storage_index = row_index as u64 + right_shift_offset as u64;
                 let first = storage.get_payload(storage_index).unwrap();
                 let second = storage
-                    .get_payload(storage_index + EXPECTED_LEN as u32)
+                    .get_payload(storage_index + EXPECTED_LEN)
                     .unwrap();
                 // assert the two payloads are equal
                 assert_eq!(first, second);
@@ -805,18 +826,21 @@ mod tests {
         let (dir, mut storage) = empty_storage();
         // load data into storage
         let point_offset = write_data(&mut storage, 0);
-        assert_eq!(point_offset, EXPECTED_LEN as u32);
-        assert_eq!(storage.page_tracker.read().mapping_len(), EXPECTED_LEN);
-        assert_eq!(storage.page_tracker.read().raw_mapping_len(), EXPECTED_LEN);
+        assert_eq!(point_offset, EXPECTED_LEN);
+        assert_eq!(storage.page_tracker.read().mapping_len() as u64, EXPECTED_LEN);
+        assert_eq!(
+            storage.page_tracker.read().header_count(),
+            EXPECTED_LEN
+        );
         assert_eq!(storage.pages.len(), 2);
 
         // write the same payload a second time
         let point_offset = write_data(&mut storage, point_offset);
-        assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
+        assert_eq!(point_offset, EXPECTED_LEN * 2);
         assert_eq!(storage.pages.len(), 3);
-        assert_eq!(storage.page_tracker.read().mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.page_tracker.read().mapping_len() as u64, EXPECTED_LEN * 2);
         assert_eq!(
-            storage.page_tracker.read().raw_mapping_len(),
+            storage.page_tracker.read().header_count(),
             EXPECTED_LEN * 2
         );
 
@@ -828,11 +852,11 @@ mod tests {
 
         // reopen storage
         let mut storage = PayloadStorage::open(dir.path().to_path_buf(), None).unwrap();
-        assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
+        assert_eq!(point_offset, EXPECTED_LEN * 2);
         assert_eq!(storage.pages.len(), 3);
-        assert_eq!(storage.page_tracker.read().mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.page_tracker.read().mapping_len() as u64, EXPECTED_LEN * 2);
         assert_eq!(
-            storage.page_tracker.read().raw_mapping_len(),
+            storage.page_tracker.read().header_count(),
             EXPECTED_LEN * 2
         );
 
@@ -843,11 +867,11 @@ mod tests {
         // loop from the end to the beginning to avoid overwriting
         let offset: u32 = 1;
         for i in (0..EXPECTED_LEN).rev() {
-            let payload = storage.get_payload(i as u32).unwrap();
+            let payload = storage.get_payload(i).unwrap();
             // move first write to the right
-            storage.put_payload(i as u32 + offset, payload.clone());
+            storage.put_payload(i + offset as u64, payload.clone());
             // move second write to the right
-            storage.put_payload(i as u32 + offset + EXPECTED_LEN as u32, payload);
+            storage.put_payload(i + offset as u64 + EXPECTED_LEN, payload);
         }
 
         // assert storage is consistent after updating
@@ -859,19 +883,19 @@ mod tests {
         let (_dir, mut storage) = empty_storage();
 
         let rng = &mut rand::thread_rng();
-        let max_point_offset = 20000;
+        let max_point_offset: u64 = 20000;
 
         let large_payloads = (0..max_point_offset)
             .map(|_| random_payload(rng, 10))
             .collect::<Vec<_>>();
 
         for (i, payload) in large_payloads.iter().enumerate() {
-            storage.put_payload(i as u32, payload.clone());
+            storage.put_payload(i as u64, payload.clone());
         }
 
         // sanity check
         for (i, payload) in large_payloads.iter().enumerate() {
-            let stored_payload = storage.get_payload(i as u32);
+            let stored_payload = storage.get_payload(i as u64);
             assert_eq!(stored_payload.as_ref(), Some(payload));
         }
 
@@ -886,13 +910,13 @@ mod tests {
             .collect::<Vec<_>>();
 
         for (i, payload) in small_payloads.iter().enumerate() {
-            storage.put_payload(i as u32, payload.clone());
+            storage.put_payload(i as u64, payload.clone());
         }
 
         // sanity check
         // check consistency
         for (i, payload) in small_payloads.iter().enumerate() {
-            let stored_payload = storage.get_payload(i as u32);
+            let stored_payload = storage.get_payload(i as u64);
             assert_eq!(stored_payload.as_ref(), Some(payload));
         }
 
@@ -904,7 +928,7 @@ mod tests {
 
         // check consistency
         for (i, payload) in small_payloads.iter().enumerate() {
-            let stored_payload = storage.get_payload(i as u32);
+            let stored_payload = storage.get_payload(i as u64);
             assert_eq!(stored_payload.as_ref(), Some(payload));
         }
 

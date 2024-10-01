@@ -13,7 +13,7 @@ pub fn random_data_bench(c: &mut Criterion) {
         let payload = random_payload(&mut rng, 5);
         b.iter(|| {
             for i in 0..PAYLOAD_COUNT {
-                storage.put_payload(i as u32, payload.clone());
+                storage.put_payload(i as u64, payload.clone());
             }
         });
     });
@@ -21,7 +21,7 @@ pub fn random_data_bench(c: &mut Criterion) {
     c.bench_function("read random payload", |b| {
         b.iter(|| {
             for i in 0..PAYLOAD_COUNT {
-                let res = storage.get_payload(i as u32);
+                let res = storage.get_payload(i as u64);
                 assert!(res.is_some());
             }
         });
@@ -56,7 +56,7 @@ pub fn real_data_data_bench(c: &mut Criterion) {
     c.bench_function("read real payload", |b| {
         b.iter(|| {
             for i in 0..point_offset {
-                let res = storage.get_payload(i as u32).unwrap();
+                let res = storage.get_payload(i as u64).unwrap();
                 assert!(res.0.contains_key("article_id"));
             }
         });

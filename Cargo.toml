@@ -18,7 +18,12 @@ rand = "0.8.5"
 criterion = "0.5.1"
 csv = "1.3.0"
 rstest = "0.23.0"
+bustle = "0.5.1"
 
 [[bench]]
 name = "storage_bench"
+harness = false
+
+[[bench]]
+name = "bustle_bench"
 harness = false

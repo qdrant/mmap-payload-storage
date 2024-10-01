@@ -7,7 +7,7 @@ use std::{io, mem, ptr};
 
 pub const TEMP_FILE_EXTENSION: &str = "tmp";
 
-pub fn create_and_ensure_length(path: &Path, length: usize) -> io::Result<File> {
+pub fn create_and_ensure_length(path: &Path, length: u64) -> io::Result<File> {
     if path.exists() {
         let file = OpenOptions::new()
             .read(true)
@@ -16,7 +16,7 @@ pub fn create_and_ensure_length(path: &Path, length: usize) -> io::Result<File> 
             // Don't truncate because we explicitly set the length later
             .truncate(false)
             .open(path)?;
-        file.set_len(length as u64)?;
+        file.set_len(length)?;
 
         Ok(file)
     } else {
@@ -31,7 +31,7 @@ pub fn create_and_ensure_length(path: &Path, length: usize) -> io::Result<File> 
                 // Don't truncate because we explicitly set the length later
                 .truncate(false)
                 .open(&temp_path)?;
-            temp_file.set_len(length as u64)?;
+            temp_file.set_len(length)?;
         }
 
         std::fs::rename(&temp_path, path)?;

@@ -5,6 +5,7 @@ use crate::utils_copied::mmap_ops::{
 use memmap2::MmapMut;
 use std::cmp::max;
 use std::path::{Path, PathBuf};
+use crate::page_tracker::PointOffset;
 
 pub type SlotId = u32;
 
@@ -38,7 +39,7 @@ impl SlottedPageHeader {
 pub struct SlotHeader {
     offset: u64,       // offset in the page (8 bytes)
     length: u64,       // length of the value (8 bytes)
-    point_offset: u32, // point id (4 bytes)
+    point_offset: u64, // point id (8 bytes)
     right_padding: u8, // padding within the value for small values (1 byte)
     deleted: bool,     // whether the value has been deleted (1 byte)
     _align: [u8; 2],   // 2 bytes padding for alignment
@@ -51,7 +52,7 @@ impl SlotHeader {
     }
 
     fn new(
-        point_offset: u32,
+        point_offset: PointOffset,
         offset: u64,
         length: u64,
         right_padding: u8,
@@ -71,7 +72,7 @@ impl SlotHeader {
         }
     }
 
-    pub fn point_offset(&self) -> u32 {
+    pub fn point_offset(&self) -> u64 {
         self.point_offset
     }
 
@@ -179,7 +180,7 @@ impl SlottedPageMmap {
     pub fn new(path: &Path, required_size: usize) -> SlottedPageMmap {
         let header = SlottedPageHeader::new(required_size);
         let page_size = header.page_size();
-        create_and_ensure_length(path, page_size).unwrap();
+        create_and_ensure_length(path, page_size as u64).unwrap();
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
         let path = path.to_path_buf();
         let mut slotted_mmap = SlottedPageMmap { path, header, mmap };
@@ -310,7 +311,7 @@ impl SlottedPageMmap {
     }
 
     /// Insert a new placeholder into the page
-    pub fn insert_placeholder_value(&mut self, point_id: u32) -> Option<SlotId> {
+    pub fn insert_placeholder_value(&mut self, point_id: PointOffset) -> Option<SlotId> {
         self.insert_value(point_id, &SlottedPageMmap::PLACEHOLDER_VALUE)
     }
 
@@ -319,7 +320,7 @@ impl SlottedPageMmap {
     /// Returns
     /// - None if there is not enough space for a new slot + value
     /// - Some(slot_id) if the value was successfully added
-    pub fn insert_value(&mut self, point_offset: u32, value: &[u8]) -> Option<SlotId> {
+    pub fn insert_value(&mut self, point_offset: PointOffset, value: &[u8]) -> Option<SlotId> {
         // size of the value in bytes
         let real_value_size = value.len();
 
@@ -522,7 +523,7 @@ mod tests {
         let mut sequence = 0u32..;
         // add placeholder values
         while mmap.has_capacity_for_min_value() {
-            mmap.insert_placeholder_value(sequence.next().unwrap())
+            mmap.insert_placeholder_value(sequence.next().unwrap() as u64)
                 .unwrap();
             let new_free_space = mmap.free_space();
             assert!(new_free_space < free_space);
@@ -535,7 +536,7 @@ mod tests {
 
         // can't add more values
         assert_eq!(
-            mmap.insert_placeholder_value(sequence.next().unwrap()),
+            mmap.insert_placeholder_value(sequence.next().unwrap() as u64),
             None
         );
 
@@ -609,7 +610,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.insert_value(i as u32, foo.to_bytes().as_slice())
+            mmap.insert_value(i as u64, foo.to_bytes().as_slice())
                 .unwrap();
         }
 
@@ -659,7 +660,7 @@ mod tests {
                 bar: i,
                 qux: i % 2 == 0,
             };
-            mmap.insert_value(i as u32, foo.to_bytes().as_slice())
+            mmap.insert_value(i as u64, foo.to_bytes().as_slice())
                 .unwrap();
         }
 
