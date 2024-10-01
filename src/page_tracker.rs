@@ -115,19 +115,22 @@ impl PageTracker {
     /// The file is resized if necessary
     fn persist_pointer(&mut self, point_offset: PointOffset) {
         let point_offset = point_offset as usize;
-        let start =
+        let pointer = self.mapping[point_offset];
+        let start_offset =
             size_of::<PageTrackerHeader>() + point_offset * size_of::<Option<PagePointer>>();
+        let end_offset = start_offset + size_of::<Option<PagePointer>>();
         // check if file is long enough
-        if self.mmap.len() < start + size_of::<Option<PagePointer>>() {
+        if self.mmap.len() < end_offset {
             // flush the current mmap
             self.mmap.flush().unwrap();
-            // reopen the file with a larger size (bump by DEFAULT_SIZE)
-            let new_size = self.mmap.len() + Self::DEFAULT_SIZE;
+            let missing_space = end_offset - self.mmap.len();
+            // reopen the file with a larger size
+            // account for missing size + extra to avoid resizing too often
+            let new_size = self.mmap.len() + missing_space + Self::DEFAULT_SIZE;
             create_and_ensure_length(&self.path, new_size).unwrap();
             self.mmap = open_write_mmap(&self.path, AdviceSetting::from(Advice::Normal)).unwrap();
         }
-        let end = start + size_of::<Option<PagePointer>>();
-        self.mmap[start..end].copy_from_slice(transmute_to_u8(&self.mapping[point_offset]));
+        self.mmap[start_offset..end_offset].copy_from_slice(transmute_to_u8(&pointer));
     }
 
     pub fn is_empty(&self) -> bool {
@@ -343,5 +346,20 @@ mod tests {
         }
         assert_eq!(tracker.mapping_len(), 100_000);
         assert!(tracker.mmap_file_size() > initial_tracker_size);
+    }
+
+    #[test]
+    fn test_track_non_sequential_large_offset() {
+        let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
+        let path = file.path();
+
+        let mut tracker = PageTracker::new(path, None);
+        assert_eq!(tracker.mapping_len(), 0);
+
+        let page_pointer = PagePointer::new(1, 1);
+        let key = 1_000_000;
+
+        tracker.set(key, page_pointer);
+        assert_eq!(tracker.get(key), Some(&page_pointer));
     }
 }
