@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 pub type PointOffset = u32;
 pub type PageId = u32;
 
+/// When compacting, we collect the point offsets moved to the new page with the new slot id.
+pub type OffsetsToSlots = Vec<(PointOffset, SlotId)>;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PagePointer {
     pub page_id: PageId,
