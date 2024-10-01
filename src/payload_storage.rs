@@ -154,7 +154,7 @@ impl PayloadStorage {
 
     /// Get the mapping for a given point offset
     fn get_pointer(&self, point_offset: PointOffset) -> Option<PagePointer> {
-        self.page_tracker.get(point_offset).copied()
+        self.page_tracker.get(point_offset)
     }
 
     /// Put a payload in the storage
@@ -409,7 +409,7 @@ mod tests {
         let payload = Payload::default();
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.mapping_len(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -427,7 +427,7 @@ mod tests {
 
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
@@ -505,7 +505,7 @@ mod tests {
 
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
@@ -523,7 +523,7 @@ mod tests {
 
         storage.put_payload(0, &updated_payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), 1);
+        assert_eq!(storage.page_tracker.mapping_len(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -780,7 +780,6 @@ mod tests {
         let point_offset = write_data(&mut storage, 0);
         assert_eq!(point_offset, EXPECTED_LEN as u32);
         assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN);
         assert_eq!(storage.pages.len(), 2);
 
         // write the same payload a second time
@@ -788,7 +787,6 @@ mod tests {
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 3);
         assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent
         storage_double_pass_is_consistent(&storage, 0);
@@ -801,7 +799,6 @@ mod tests {
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 3);
         assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
-        assert_eq!(storage.page_tracker.raw_mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent after reopening
         storage_double_pass_is_consistent(&storage, 0);
