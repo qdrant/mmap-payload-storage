@@ -106,7 +106,7 @@ impl SlottedPageMmap {
 
     /// Minimum new page size required for a value of the given size.
     pub fn new_page_size_for_value(value_size: usize) -> usize {
-        size_of::<SlotHeader>() + Self::required_size_for_value(value_size)
+        size_of::<SlottedPageHeader>() + Self::required_size_for_value(value_size)
     }
 
     /// Minimum new size required for a value of the given size.
@@ -554,7 +554,7 @@ mod tests {
 
         let expected_slot_count = 13_796;
         assert_eq!(mmap.header.slot_count, expected_slot_count);
-        assert_eq!(mmap.free_space(), 136); // not enough space for a new slot + placeholder value
+        assert_eq!(mmap.free_space(), 128); // not enough space for a new slot + placeholder value
 
         // can't add more values
         assert_eq!(
@@ -591,7 +591,7 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 10);
-        assert_eq!(mmap.free_space(), 2_095_608);
+        assert_eq!(mmap.free_space(), 2_095_600);
 
         // read slots
         let slot = mmap.get_slot(&0).unwrap();
@@ -637,7 +637,7 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 100);
-        assert_eq!(mmap.free_space(), 2_081_928);
+        assert_eq!(mmap.free_space(), 2_081_920);
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
@@ -862,7 +862,7 @@ mod tests {
         let page_size = SlottedPageMmap::new_page_size_for_value(value_size);
         assert_eq!(
             page_size,
-            128 + SlotHeader::size_in_bytes() + SlotHeader::size_in_bytes()
+            128 + size_of::<SlottedPageHeader>() + SlotHeader::size_in_bytes()
         );
     }
 }
