@@ -48,30 +48,21 @@ impl PayloadStorage {
         let page_tracker = PageTracker::open(&path)?;
         let page_ids = page_tracker.all_page_ids();
         // load pages
-        let mut pages = HashMap::new();
-        let mut page_emptiness = PriorityQueue::new();
-        let mut max_page_id: u32 = 0;
+        let mut storage = Self {
+            page_tracker,
+            new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
+            pages: Default::default(),
+            max_page_id: 0,
+            page_emptiness: Default::default(),
+            base_path: path.clone(),
+        };
         for page_id in page_ids {
             let page_path = &path.join(format!("slotted-paged-{}.dat", page_id));
             let slotted_page = SlottedPageMmap::open(page_path).expect("Page not found");
 
-            page_emptiness.push(page_id, slotted_page.free_space());
-
-            let previous = pages.insert(page_id, slotted_page);
-            debug_assert!(previous.is_none(), "Page {} already in pages", page_id);
-
-            if page_id > max_page_id {
-                max_page_id = page_id;
-            }
+            storage.add_page(page_id, slotted_page);
         }
-        Some(Self {
-            page_tracker,
-            new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
-            pages,
-            max_page_id,
-            page_emptiness,
-            base_path: path,
-        })
+        Some(storage)
     }
 
     pub fn is_empty(&self) -> bool {
