@@ -158,7 +158,10 @@ impl PayloadStorage {
     }
 
     /// Put a payload in the storage
-    pub fn put_payload(&mut self, point_offset: PointOffset, payload: &Payload) {
+    ///
+    /// If the payload already exists, it will be updated.
+    /// Returns true if no payload value existed for the key.
+    pub fn put_payload(&mut self, point_offset: PointOffset, payload: &Payload) -> bool {
         let payload_bytes = payload.to_bytes();
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
@@ -183,6 +186,8 @@ impl PayloadStorage {
                 self.page_tracker
                     .set(point_offset, PagePointer::new(new_page_id, new_slot_id));
             }
+            // a value existed for the key
+            false
         } else {
             // this is a new payload
             let page_id = self
@@ -198,7 +203,19 @@ impl PayloadStorage {
             // update page_tracker
             self.page_tracker
                 .set(point_offset, PagePointer::new(page_id, slot_id));
+            // a value did not exist for the key
+            true
         }
+    }
+
+    /// Update the value for key in the collection, if it exists.
+    /// Should return true if the key existed and was updated.
+    /// Should not insert the key if it did not exist.
+    pub fn update_payload(&mut self, point_offset: PointOffset, payload: &Payload) -> bool {
+        if self.get_pointer(point_offset).is_none() {
+            return false;
+        }
+        self.put_payload(point_offset, payload)
     }
 
     /// Delete a payload from the storage
