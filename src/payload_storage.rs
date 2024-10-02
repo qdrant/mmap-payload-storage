@@ -205,7 +205,7 @@ impl PayloadStorage {
     /// Returns None if the point_offset, page, or payload was not found
     pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<()> {
         let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
-        let page = self.pages.get_mut(&page_id)?;
+        let page = self.pages.get_mut(&page_id).expect("Page not found");
         // delete value from page
         page.delete_value(slot_id);
         // delete mapping

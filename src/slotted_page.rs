@@ -385,7 +385,7 @@ impl SlottedPageMmap {
 
         // mark slot as deleted
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
-        let current_slot = self.get_slot(&slot_id)?;
+        let current_slot = self.get_slot(&slot_id).expect("Slot should exist");
         let updated_slot = SlotHeader {
             deleted: true,
             ..current_slot
