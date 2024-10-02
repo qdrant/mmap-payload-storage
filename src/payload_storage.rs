@@ -2,6 +2,7 @@ use crate::page_tracker::{OffsetsToSlots, PageId, PagePointer, PageTracker, Poin
 use crate::payload::Payload;
 use crate::slotted_page::{SlotHeader, SlotId, SlottedPageMmap};
 use lz4_flex::compress_prepend_size;
+use priority_queue::PriorityQueue;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -12,6 +13,7 @@ pub struct PayloadStorage {
     new_page_size: usize, // page size in bytes when creating new pages
     pages: HashMap<u32, SlottedPageMmap>, // page_id -> mmap page
     max_page_id: u32,
+    page_emptiness: PriorityQueue<PageId, usize>,
     base_path: PathBuf,
 }
 
@@ -35,6 +37,7 @@ impl PayloadStorage {
             new_page_size: page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages: HashMap::new(),
             max_page_id: 0,
+            page_emptiness: PriorityQueue::new(),
             base_path: path,
         }
     }
@@ -45,27 +48,25 @@ impl PayloadStorage {
         let page_tracker = PageTracker::open(&path)?;
         let page_ids = page_tracker.all_page_ids();
         // load pages
-        let mut pages = HashMap::new();
-        let mut max_page_id: u32 = 0;
+        let mut storage = Self {
+            page_tracker,
+            new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
+            pages: Default::default(),
+            max_page_id: 0,
+            page_emptiness: Default::default(),
+            base_path: path.clone(),
+        };
         for page_id in page_ids {
             let page_path = &path.join(format!("slotted-paged-{}.dat", page_id));
             let slotted_page = SlottedPageMmap::open(page_path).expect("Page not found");
-            pages.insert(page_id, slotted_page);
-            if page_id > max_page_id {
-                max_page_id = page_id;
-            }
+
+            storage.add_page(page_id, slotted_page);
         }
-        Some(Self {
-            page_tracker,
-            new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
-            pages,
-            max_page_id,
-            base_path: path,
-        })
+        Some(storage)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pages.is_empty() && self.page_tracker.is_empty()
+        self.pages.is_empty()
     }
 
     /// Get the path for a given page id
@@ -80,9 +81,12 @@ impl PayloadStorage {
         if page_exists {
             return false;
         }
-        let previous = self.pages.insert(page_id, page);
 
-        assert!(previous.is_none());
+        let previous = self.page_emptiness.push(page_id, page.free_space());
+        debug_assert!(previous.is_none());
+
+        let previous = self.pages.insert(page_id, page);
+        debug_assert!(previous.is_none());
 
         if page_id > self.max_page_id {
             self.max_page_id = page_id;
@@ -99,6 +103,26 @@ impl PayloadStorage {
         let decompressed = Self::decompress(raw);
         let payload = Payload::from_bytes(&decompressed);
         Some(payload)
+    }
+
+    fn find_first_fitting_page(&self, payload_size: usize) -> Option<u32> {
+        let needed_size = SlottedPageMmap::required_size_for_value(payload_size);
+
+        #[cfg(debug_assertions)]
+        {
+            if let Some((page_id, free_space)) = self.page_emptiness.peek() {
+                debug_assert_eq!(
+                    self.pages.get(page_id).unwrap().free_space(),
+                    *free_space,
+                    "page id {} has a different computed free space than it is stored in pq",
+                    page_id
+                );
+            };
+        }
+
+        self.page_emptiness
+            .peek()
+            .and_then(|(page_id, &free_space)| (free_space >= needed_size).then_some(*page_id))
     }
 
     /// Find the best fitting page for a payload
@@ -170,30 +194,44 @@ impl PayloadStorage {
                 // delete slot
                 page.delete_value(slot_id);
 
-                // find a new page (or create a new one if all full)
-                let new_page_id = self
-                    .find_best_fitting_page(payload_size)
-                    .unwrap_or_else(|| {
-                        // create a new page
-                        self.create_new_page_for_payload(payload_size)
-                    });
-                let page = self.pages.get_mut(&new_page_id).unwrap();
-                let new_slot_id = page.insert_value(point_offset, &comp_payload).unwrap();
+                // find a fitting page (or create a new one if all full)
+                let other_page_id =
+                    self.find_first_fitting_page(payload_size)
+                        .unwrap_or_else(|| {
+                            // create a new page
+                            self.create_new_page_for_payload(payload_size)
+                        });
+                let other_page = self.pages.get_mut(&other_page_id).unwrap();
+                let new_slot_id = other_page
+                    .insert_value(point_offset, &comp_payload)
+                    .unwrap();
+
+                // update page_emptiness
+                let previous_prio = self
+                    .page_emptiness
+                    .push(other_page_id, other_page.free_space());
+                debug_assert!(previous_prio.is_some());
+
                 // update page_tracker
                 self.page_tracker
-                    .set(point_offset, PagePointer::new(new_page_id, new_slot_id));
+                    .set(point_offset, PagePointer::new(other_page_id, new_slot_id));
             }
         } else {
             // this is a new payload
             let page_id = self
-                .find_best_fitting_page(payload_size)
+                .find_first_fitting_page(payload_size)
                 .unwrap_or_else(|| {
                     // create a new page
                     self.create_new_page_for_payload(payload_size)
                 });
 
             let page = self.pages.get_mut(&page_id).unwrap();
+
             let slot_id = page.insert_value(point_offset, &comp_payload).unwrap();
+
+            // update page_emptiness
+            self.page_emptiness
+                .change_priority(&page_id, page.free_space());
 
             // update page_tracker
             self.page_tracker
@@ -380,8 +418,7 @@ impl PayloadStorage {
         }
 
         // add page to hashmap
-        self.pages.insert(page_id, page);
-        self.max_page_id = page_id;
+        self.add_page(page_id, page);
     }
 }
 
