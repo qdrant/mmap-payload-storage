@@ -661,6 +661,7 @@ mod tests {
 
             let fragmented_space = page.fragmented_space();
             assert_eq!(fragmented_space, 0);
+            assert_eq!(fragmented_space, page.calculate_fragmented_space());
         }
 
         {
@@ -677,6 +678,7 @@ mod tests {
                 "free space should be around 50MB, but it is: {}",
                 fragmented_space
             );
+            assert_eq!(fragmented_space, page.calculate_fragmented_space());
         }
 
         // compact storage to remove fragmentation
@@ -842,6 +844,7 @@ mod tests {
         // check no fragmentation
         for page in storage.pages.values() {
             assert_eq!(page.fragmented_space(), 0);
+            assert_eq!(page.calculate_fragmented_space(), 0);
         }
 
         // update with smaller values

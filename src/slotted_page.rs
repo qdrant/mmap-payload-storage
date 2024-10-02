@@ -19,6 +19,9 @@ struct SlottedPageHeader {
 
     /// The page size in bytes.
     page_size: u64,
+
+    /// The number of bytes in between the data.
+    fragmented_bytes: u64,
 }
 
 impl SlottedPageHeader {
@@ -27,6 +30,7 @@ impl SlottedPageHeader {
             slot_count: 0,
             data_start_offset: required_size as u64,
             page_size: required_size as u64,
+            fragmented_bytes: 0,
         }
     }
 
@@ -102,7 +106,7 @@ impl SlottedPageMmap {
 
     /// Minimum new page size required for a value of the given size.
     pub fn new_page_size_for_value(value_size: usize) -> usize {
-        size_of::<SlotHeader>() + Self::required_size_for_value(value_size)
+        size_of::<SlottedPageHeader>() + Self::required_size_for_value(value_size)
     }
 
     /// Minimum new size required for a value of the given size.
@@ -276,8 +280,14 @@ impl SlottedPageMmap {
         self.header.page_size()
     }
 
-    /// Sums the amount of unused space in between the data.
+    /// Return the stored amount of fragmentation in the page
     pub fn fragmented_space(&self) -> usize {
+        self.header.fragmented_bytes as usize
+    }
+
+    /// Sums the amount of unused space in between the data.
+    #[cfg(test)]
+    pub fn calculate_fragmented_space(&self) -> usize {
         let mut fragmented_space = 0;
 
         let mut slot_id = 0;
@@ -381,6 +391,11 @@ impl SlottedPageMmap {
             ..current_slot
         };
         self.mmap[slot_start..slot_end].copy_from_slice(transmute_to_u8(&updated_slot));
+
+        // update fragmentation
+        self.header.fragmented_bytes += updated_slot.length;
+        self.write_page_header();
+
         Some(())
     }
 
@@ -411,6 +426,7 @@ impl SlottedPageMmap {
         let value_end = value_start + real_value_size;
         self.mmap[value_start..value_end].copy_from_slice(new_value);
 
+        // update padded region
         let right_padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
         let padding_start = value_end;
         let padding_end = padding_start + right_padding;
@@ -428,9 +444,15 @@ impl SlottedPageMmap {
             right_padding as u8, // new padding
             false,               // mark as non deleted
         );
-        // When the new value is smaller than the previous one, it will create unused space in the data region.
-        // However, this will be solved when compacting.
         self.write_slot(slot_id, update_slot);
+
+        // update fragmentation
+        // When the new value is smaller than the previous one, it will create unused space in the data region.
+        let unused_space = slot.length.saturating_sub(value_len as u64);
+        if unused_space > 0 {
+            self.header.fragmented_bytes += unused_space;
+            self.write_page_header();
+        }
 
         true
     }
@@ -532,7 +554,7 @@ mod tests {
 
         let expected_slot_count = 13_796;
         assert_eq!(mmap.header.slot_count, expected_slot_count);
-        assert_eq!(mmap.free_space(), 136); // not enough space for a new slot + placeholder value
+        assert_eq!(mmap.free_space(), 128); // not enough space for a new slot + placeholder value
 
         // can't add more values
         assert_eq!(
@@ -569,7 +591,7 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 10);
-        assert_eq!(mmap.free_space(), 2_095_608);
+        assert_eq!(mmap.free_space(), 2_095_600);
 
         // read slots
         let slot = mmap.get_slot(&0).unwrap();
@@ -615,7 +637,7 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 100);
-        assert_eq!(mmap.free_space(), 2_081_928);
+        assert_eq!(mmap.free_space(), 2_081_920);
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
@@ -801,6 +823,7 @@ mod tests {
         let mut fragmented_space = mmap.fragmented_space();
 
         assert_eq!(fragmented_space, 0);
+        assert_eq!(fragmented_space, mmap.calculate_fragmented_space());
 
         // delete some values
         for i in 0..500 {
@@ -813,6 +836,7 @@ mod tests {
 
         // 250 values are deleted, so 250 * 200 bytes are fragmented
         assert_eq!(fragmented_space, 250 * 200);
+        assert_eq!(fragmented_space, mmap.calculate_fragmented_space());
 
         // update some values
         let min_value = [1; SlottedPageMmap::MIN_VALUE_SIZE_BYTES];
@@ -829,6 +853,7 @@ mod tests {
         let expected_fragmentation =
             250 * (200 - SlottedPageMmap::MIN_VALUE_SIZE_BYTES) + 250 * 200;
         assert_eq!(fragmented_space, expected_fragmentation);
+        assert_eq!(fragmented_space, mmap.calculate_fragmented_space());
     }
 
     #[test]
@@ -837,7 +862,7 @@ mod tests {
         let page_size = SlottedPageMmap::new_page_size_for_value(value_size);
         assert_eq!(
             page_size,
-            128 + SlotHeader::size_in_bytes() + SlotHeader::size_in_bytes()
+            128 + size_of::<SlottedPageHeader>() + SlotHeader::size_in_bytes()
         );
     }
 }
