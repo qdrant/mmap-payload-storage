@@ -10,10 +10,10 @@ use std::path::PathBuf;
 
 pub struct PayloadStorage {
     page_tracker: PageTracker,
-    new_page_size: usize, // page size in bytes when creating new pages
-    pages: HashMap<u32, SlottedPageMmap>, // page_id -> mmap page
+    pub(super) new_page_size: usize, // page size in bytes when creating new pages
+    pub(super) pages: HashMap<u32, SlottedPageMmap>, // page_id -> mmap page
     max_page_id: u32,
-    page_emptiness: PriorityQueue<PageId, usize>,
+    pub(super) page_emptiness: PriorityQueue<PageId, usize>,
     base_path: PathBuf,
 }
 
@@ -261,7 +261,7 @@ impl PayloadStorage {
 
                 // check if we should defrag this page
                 let frag_threshold =
-                    SlottedPageMmap::FRAGMENTATION_THRESHOLD_RATIO * page.page_size() as f32;
+                    SlottedPageMmap::FRAGMENTATION_THRESHOLD_RATIO * page.size() as f32;
                 if frag_space < frag_threshold.ceil() as usize {
                     // page is not fragmented enough, skip
                     return None;

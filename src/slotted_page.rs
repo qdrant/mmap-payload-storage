@@ -274,7 +274,7 @@ impl SlottedPageMmap {
             .expect("this should never overflow, otherwise the page is corrupted")
     }
 
-    pub fn page_size(&self) -> usize {
+    pub fn size(&self) -> usize {
         self.header.page_size()
     }
 
@@ -289,7 +289,7 @@ impl SlottedPageMmap {
         let mut fragmented_space = 0;
 
         let mut slot_id = 0;
-        let mut last_offset = self.page_size() as u64;
+        let mut last_offset = self.size() as u64;
         while let Some(slot) = self.get_slot_ref(&slot_id) {
             // if the slot is deleted, we can consider it empty space
             if slot.deleted {
