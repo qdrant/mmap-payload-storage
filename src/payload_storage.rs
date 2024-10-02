@@ -94,8 +94,8 @@ impl PayloadStorage {
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
         let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
-        let page = self.pages.get(&page_id)?;
-        let raw = page.get_value(&slot_id)?;
+        let page = self.pages.get(&page_id).expect("Page not found");
+        let raw = page.get_value(&slot_id).expect("Slot not found");
         let decompressed = Self::decompress(raw);
         let payload = Payload::from_bytes(&decompressed);
         Some(payload)
