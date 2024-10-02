@@ -4,6 +4,7 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub type PointOffset = u32;
@@ -78,8 +79,8 @@ impl PageTracker {
         self.mmap.len()
     }
 
-    pub fn all_page_ids(&self) -> Vec<PageId> {
-        let mut page_ids = vec![];
+    pub fn all_page_ids(&self) -> HashSet<PageId> {
+        let mut page_ids = HashSet::new();
         for i in 0..self.header.max_point_offset {
             let start_offset =
                 size_of::<PageTrackerHeader>() + i as usize * size_of::<Option<PagePointer>>();
@@ -87,7 +88,7 @@ impl PageTracker {
             let page_pointer: &Option<PagePointer> =
                 transmute_from_u8(&self.mmap[start_offset..end_offset]);
             if let Some(page_pointer) = page_pointer {
-                page_ids.push(page_pointer.page_id);
+                page_ids.insert(page_pointer.page_id);
             }
         }
         page_ids
@@ -123,14 +124,25 @@ impl PageTracker {
         self.mmap[start_offset..end_offset].copy_from_slice(transmute_to_u8(&pointer));
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.mapping_len() == 0
     }
 
     /// Get the length of the mapping
     /// Excludes None values
+    #[cfg(test)]
     pub fn mapping_len(&self) -> usize {
-        self.all_page_ids().len()
+        (0..self.header.max_point_offset)
+            .filter(|&i| {
+                let start_offset =
+                    size_of::<PageTrackerHeader>() + i as usize * size_of::<Option<PagePointer>>();
+                let end_offset = start_offset + size_of::<Option<PagePointer>>();
+                let page_pointer: &Option<PagePointer> =
+                    transmute_from_u8(&self.mmap[start_offset..end_offset]);
+                page_pointer.is_some()
+            })
+            .count()
     }
 
     /// Get the raw value at the given point offset

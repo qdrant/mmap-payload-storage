@@ -266,14 +266,12 @@ impl SlottedPageMmap {
     /// Return the amount of free space in the page
     pub fn free_space(&self) -> usize {
         let slot_count = self.header.slot_count as usize;
-        if slot_count == 0 {
-            // contains only the header
-            return self.mmap.len() - size_of::<SlottedPageHeader>();
-        }
         let last_slot_offset =
             size_of::<SlottedPageHeader>() + slot_count * SlotHeader::size_in_bytes();
         let data_start_offset = self.header.data_start_offset as usize;
-        data_start_offset.saturating_sub(last_slot_offset)
+        data_start_offset
+            .checked_sub(last_slot_offset)
+            .expect("this should never overflow, otherwise the page is corrupted")
     }
 
     pub fn page_size(&self) -> usize {
