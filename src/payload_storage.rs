@@ -14,7 +14,10 @@ pub struct PayloadStorage {
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
     pub(super) pages: HashMap<u32, SlottedPageMmap>, // page_id -> mmap page
     max_page_id: u32,
-    pub(super) page_emptiness: PriorityQueue<PageId, usize>,
+    /// Priority queue of pages by amount of free space
+    pub(super) pages_by_free_space: PriorityQueue<PageId, usize>,
+    /// Priority queue of pages by amount of deleted slots
+    pages_by_deleted_slots: PriorityQueue<PageId, usize>,
     base_path: PathBuf,
 }
 
@@ -38,7 +41,8 @@ impl PayloadStorage {
             new_page_size: page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages: HashMap::new(),
             max_page_id: 0,
-            page_emptiness: PriorityQueue::new(),
+            pages_by_free_space: PriorityQueue::new(),
+            pages_by_deleted_slots: PriorityQueue::new(),
             base_path: path,
         }
     }
@@ -54,7 +58,8 @@ impl PayloadStorage {
             new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages: Default::default(),
             max_page_id: 0,
-            page_emptiness: Default::default(),
+            pages_by_free_space: Default::default(),
+            pages_by_deleted_slots: Default::default(),
             base_path: path.clone(),
         };
         for page_id in page_ids {
@@ -83,7 +88,12 @@ impl PayloadStorage {
             return false;
         }
 
-        let previous = self.page_emptiness.push(page_id, page.free_space());
+        let previous = self.pages_by_free_space.push(page_id, page.free_space());
+        debug_assert!(previous.is_none());
+
+        let previous = self
+            .pages_by_deleted_slots
+            .push(page_id, page.deleted_slots_count());
         debug_assert!(previous.is_none());
 
         let previous = self.pages.insert(page_id, page);
@@ -109,9 +119,18 @@ impl PayloadStorage {
     fn find_first_fitting_page(&self, payload_size: usize) -> Option<u32> {
         let needed_size = SlottedPageMmap::required_size_for_value(payload_size);
 
+        if let Some((page_id, _deleted_slots_count)) = self.pages_by_deleted_slots.peek() {
+            if let Some(page) = self.pages.get(page_id) {
+                let slot = page.largest_deleted_slot();
+                if slot.length >= needed_size as u64 {
+                    return Some(*page_id);
+                }
+            }
+        }
+
         #[cfg(debug_assertions)]
         {
-            if let Some((page_id, free_space)) = self.page_emptiness.peek() {
+            if let Some((page_id, free_space)) = self.pages_by_free_space.peek() {
                 debug_assert_eq!(
                     self.pages.get(page_id).unwrap().free_space(),
                     *free_space,
@@ -121,13 +140,14 @@ impl PayloadStorage {
             };
         }
 
-        self.page_emptiness
+        self.pages_by_free_space
             .peek()
             .and_then(|(page_id, &free_space)| (free_space >= needed_size).then_some(*page_id))
     }
 
     /// Find the best fitting page for a payload
     /// Returns Some(page_id) of the best fitting page or None if no page has enough space
+    // TODO? consider the priority queues and/or deleted slots in each page.
     fn find_best_fitting_page(&self, payload_size: usize) -> Option<u32> {
         if self.pages.is_empty() {
             return None;
@@ -194,6 +214,13 @@ impl PayloadStorage {
             if !updated {
                 // delete slot
                 page.delete_value(slot_id);
+                // delete mapping
+                self.page_tracker.unset(point_offset);
+                // update pages_by_deleted_slots
+                let previous_prio = self
+                    .pages_by_deleted_slots
+                    .push(page_id, page.deleted_slots_count());
+                debug_assert!(previous_prio.is_some());
 
                 // find a fitting page (or create a new one if all full)
                 let other_page_id =
@@ -203,15 +230,23 @@ impl PayloadStorage {
                             self.create_new_page_for_payload(payload_size)
                         });
                 let other_page = self.pages.get_mut(&other_page_id).unwrap();
-                let new_slot_id = other_page
+                let (new_slot_id, is_new) = other_page
                     .insert_value(point_offset, &comp_payload)
                     .unwrap();
 
-                // update page_emptiness
-                let previous_prio = self
-                    .page_emptiness
-                    .push(other_page_id, other_page.free_space());
-                debug_assert!(previous_prio.is_some());
+                if is_new {
+                    // update pages_by_free_space
+                    let previous_prio = self
+                        .pages_by_free_space
+                        .push(other_page_id, other_page.free_space());
+                    debug_assert!(previous_prio.is_some());
+                } else {
+                    // it was a reused slot, update pages_by_deleted_slots
+                    let previous_prio = self
+                        .pages_by_deleted_slots
+                        .push(other_page_id, other_page.deleted_slots_count());
+                    debug_assert!(previous_prio.is_some());
+                }
 
                 // update page_tracker
                 self.page_tracker
@@ -228,11 +263,19 @@ impl PayloadStorage {
 
             let page = self.pages.get_mut(&page_id).unwrap();
 
-            let slot_id = page.insert_value(point_offset, &comp_payload).unwrap();
+            let (slot_id, is_new) = page.insert_value(point_offset, &comp_payload).unwrap();
 
-            // update page_emptiness
-            self.page_emptiness
-                .change_priority(&page_id, page.free_space());
+            if is_new {
+                // update pages_by_free_space
+                let previous_prio = self.pages_by_free_space.push(page_id, page.free_space());
+                debug_assert!(previous_prio.is_some());
+            } else {
+                // it was a reused slot, update pages_by_deleted_slots
+                let previous_prio = self
+                    .pages_by_deleted_slots
+                    .push(page_id, page.deleted_slots_count());
+                debug_assert!(previous_prio.is_some());
+            }
 
             // update page_tracker
             self.page_tracker
@@ -254,6 +297,12 @@ impl PayloadStorage {
         page.delete_value(slot_id);
         // delete mapping
         self.page_tracker.unset(point_offset);
+        // update pages_by_deleted_slots
+        let previous_prio = self
+            .pages_by_deleted_slots
+            .push(page_id, page.deleted_slots_count());
+        debug_assert!(previous_prio.is_some());
+
         Some(payload)
     }
 
@@ -419,11 +468,12 @@ impl PayloadStorage {
             new_page.insert_placeholder_value(point_offset)
         };
 
-        let Some(slot_id) = was_inserted else {
+        let Some((slot_id, _is_new)) = was_inserted else {
             // new page is full, request to create a new one
             let size_hint = value.map(|v| v.len());
             return ControlFlow::Break(size_hint);
         };
+        // TODO: update pages_by_deleted_slots and pages_by_free_space depending on _is_new
 
         ControlFlow::Continue(Some((point_offset, slot_id)))
     }

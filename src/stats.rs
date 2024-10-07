@@ -23,7 +23,7 @@ impl PayloadStorage {
         let pages_count = self.pages.len();
         let default_page_bytes = self.new_page_size;
         let available_bytes = self
-            .page_emptiness
+            .pages_by_free_space
             .iter()
             .map(|(_, &free_space)| free_space)
             .sum();
