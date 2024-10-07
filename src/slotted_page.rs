@@ -536,7 +536,7 @@ impl SlottedPageMmap {
         if current_slot.deleted {
             return None;
         }
-        
+
         // mark slot as deleted
         let updated_slot = SlotHeader {
             deleted: true,
@@ -1035,7 +1035,6 @@ mod tests {
 
         let mut page = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
 
-        
         // insert two values with different sizes
         let foo = Foo { bar: 1, qux: true }.to_bytes();
         let (slot_id, _) = page.insert_value(0, &foo).unwrap();
@@ -1046,7 +1045,6 @@ mod tests {
         assert_eq!(retrieved_value, foo);
         let retrieved_value_large = page.get_value(&slot_id_large).unwrap();
         assert_eq!(retrieved_value_large, &foo_large);
-        
 
         page.delete_value(slot_id_large);
         page.delete_value(slot_id);
