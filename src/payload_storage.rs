@@ -257,6 +257,14 @@ impl PayloadStorage {
         Some(payload)
     }
 
+    /// Wipe the storage, drop all pages and delete the base directory
+    pub fn wipe(&mut self) {
+        // clear pages
+        self.pages.clear();
+        // deleted base directory
+        std::fs::remove_dir_all(&self.base_path).unwrap();
+    }
+
     /// Page ids with amount of fragmentation, ordered by most to least fragmentation
     fn pages_to_defrag(&self) -> Vec<(u32, usize)> {
         let mut fragmentation = self
@@ -867,6 +875,11 @@ mod tests {
 
         // assert storage is consistent after updating
         storage_double_pass_is_consistent(&storage, offset);
+
+        // wipe storage manually
+        assert!(dir.path().exists());
+        storage.wipe();
+        assert!(!dir.path().exists());
     }
 
     #[test]
