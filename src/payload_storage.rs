@@ -121,9 +121,10 @@ impl PayloadStorage {
 
         if let Some((page_id, _deleted_slots_count)) = self.pages_by_deleted_slots.peek() {
             if let Some(page) = self.pages.get(page_id) {
-                let slot = page.largest_deleted_slot();
-                if slot.length >= needed_size as u64 {
-                    return Some(*page_id);
+                if let Some(slot) = page.largest_deleted_slot() {
+                    if slot.length >= needed_size as u64 {
+                        return Some(*page_id);
+                    }
                 }
             }
         }

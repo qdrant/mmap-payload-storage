@@ -4,6 +4,7 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
+use priority_queue::PriorityQueue;
 use std::cmp::max;
 use std::path::{Path, PathBuf};
 
@@ -100,6 +101,7 @@ pub(crate) struct SlottedPageMmap {
     path: PathBuf,
     header: SlottedPageHeader,
     mmap: MmapMut,
+    deleted_slots: PriorityQueue<SlotId, u32>,
 }
 
 impl SlottedPageMmap {
@@ -205,7 +207,13 @@ impl SlottedPageMmap {
         create_and_ensure_length(path, page_size).unwrap();
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
         let path = path.to_path_buf();
-        let mut slotted_mmap = SlottedPageMmap { path, header, mmap };
+        let deleted_slots = PriorityQueue::new();
+        let mut slotted_mmap = SlottedPageMmap {
+            path,
+            header,
+            mmap,
+            deleted_slots,
+        };
         slotted_mmap.write_page_header();
         slotted_mmap
     }
@@ -221,7 +229,24 @@ impl SlottedPageMmap {
             transmute_from_u8(&mmap[0..size_of::<SlottedPageHeader>()]);
         let header = header.clone();
         let path = path.to_path_buf();
-        Some(SlottedPageMmap { path, header, mmap })
+        let mut page = SlottedPageMmap {
+            path,
+            header,
+            mmap,
+            deleted_slots: PriorityQueue::new(),
+        };
+
+        // Populate the deleted slots queue
+        let mut deleted_slots = PriorityQueue::new();
+        for (slot, slot_id) in page.iter_slots_starting_from(0).zip(0u32..) {
+            if slot.deleted {
+                deleted_slots.push(slot_id, slot.length as u32);
+            }
+        }
+
+        page.deleted_slots = deleted_slots;
+
+        Some(page)
     }
 
     /// Get value associated with the slot id.
@@ -296,23 +321,13 @@ impl SlottedPageMmap {
         self.header.deleted_slots_count as usize
     }
 
-    pub fn largest_deleted_slot(&self) -> LargestSlot {
-        self.iter_slots_starting_from(0).zip(0u32..).fold(
-            LargestSlot {
-                slot_id: 0,
-                length: 0,
-            },
-            |largest, (slot, slot_id)| {
-                if slot.deleted && slot.length > largest.length {
-                    LargestSlot {
-                        slot_id,
-                        length: slot.length,
-                    }
-                } else {
-                    largest
-                }
-            },
-        )
+    pub fn largest_deleted_slot(&self) -> Option<LargestSlot> {
+        self.deleted_slots
+            .peek()
+            .map(|(slot_id, length)| LargestSlot {
+                slot_id: *slot_id,
+                length: *length as u64,
+            })
     }
 
     pub fn size(&self) -> usize {
@@ -384,19 +399,21 @@ impl SlottedPageMmap {
         let value_len = real_value_size + padding;
 
         // Choose between reusing a deleted slot or using the free space
-        let largest_deleted_slot = self.largest_deleted_slot();
-        if largest_deleted_slot.length >= value_len as u64 {
-            self.insert_value_in_deleted_slot(
-                largest_deleted_slot.slot_id,
-                point_offset,
-                value,
-                padding,
-            )
-            .map(|slot_id| (slot_id, false))
-        } else {
-            self.insert_new_value(point_offset, value, padding)
-                .map(|slot_id| (slot_id, true))
+        if let Some(largest_deleted_slot) = self.largest_deleted_slot() {
+            if largest_deleted_slot.length >= value_len as u64 {
+                return self
+                    .insert_value_in_deleted_slot(
+                        largest_deleted_slot.slot_id,
+                        point_offset,
+                        value,
+                        padding,
+                    )
+                    .map(|slot_id| (slot_id, false));
+            }
         }
+
+        self.insert_new_value(point_offset, value, padding)
+            .map(|slot_id| (slot_id, true))
     }
 
     /// Insert a new value into the page
@@ -503,6 +520,7 @@ impl SlottedPageMmap {
         self.header.deleted_slots_count = self.header.deleted_slots_count.saturating_sub(1);
         self.write_page_header();
 
+        self.deleted_slots.remove(&slot_id);
         Some(slot_id)
     }
 
@@ -529,6 +547,8 @@ impl SlottedPageMmap {
         self.header.deleted_slots_count += 1;
 
         self.write_page_header();
+
+        self.deleted_slots.push(slot_id, current_slot.length as u32);
 
         Some(())
     }
