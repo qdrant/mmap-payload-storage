@@ -266,9 +266,9 @@ impl PayloadStorage {
     }
 
     /// Flush all mmap pages to disk
-    pub fn flush(&mut self) -> std::io::Result<()> {
+    pub fn flush(&self) -> std::io::Result<()> {
         self.page_tracker.flush()?;
-        for page in self.pages.values_mut() {
+        for page in self.pages.values() {
             page.flush()?;
         }
         Ok(())
