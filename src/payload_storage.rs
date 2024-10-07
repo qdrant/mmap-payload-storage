@@ -242,14 +242,19 @@ impl PayloadStorage {
 
     /// Delete a payload from the storage
     /// Returns None if the point_offset, page, or payload was not found
-    pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<()> {
+    /// Returns the deleted payload otherwise
+    pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<Payload> {
         let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
         let page = self.pages.get_mut(&page_id).expect("Page not found");
+        // get current value
+        let raw = page.get_value(&slot_id).expect("Slot not found");
+        let decompressed = Self::decompress(raw);
+        let payload = Payload::from_bytes(&decompressed);
         // delete value from page
         page.delete_value(slot_id);
         // delete mapping
         self.page_tracker.unset(point_offset);
-        Some(())
+        Some(payload)
     }
 
     /// Page ids with amount of fragmentation, ordered by most to least fragmentation
@@ -520,11 +525,11 @@ mod tests {
         assert_eq!(page_mapping.slot_id, 0); // first slot
 
         let stored_payload = storage.get_payload(0);
-        assert!(stored_payload.is_some());
-        assert_eq!(stored_payload.unwrap(), payload);
+        assert_eq!(stored_payload, Some(payload));
 
         // delete payload
-        storage.delete_payload(0);
+        let deleted = storage.delete_payload(0);
+        assert_eq!(deleted, stored_payload);
         assert_eq!(storage.pages.len(), 1);
 
         // get payload again
@@ -616,8 +621,13 @@ mod tests {
                     model_hashmap.insert(point_offset, payload);
                 }
                 Operation::Delete(point_offset) => {
-                    storage.delete_payload(point_offset);
-                    model_hashmap.remove(&point_offset);
+                    let old1 = storage.delete_payload(point_offset);
+                    let old2 = model_hashmap.remove(&point_offset);
+                    assert_eq!(
+                        old1, old2,
+                        "same deletion failed for point_offset: {} with {:?} vs {:?}",
+                        point_offset, old1, old2
+                    );
                 }
                 Operation::Update(point_offset, payload) => {
                     storage.put_payload(point_offset, &payload);
@@ -704,7 +714,8 @@ mod tests {
 
         {
             // delete payload
-            storage.delete_payload(0);
+            let deleted = storage.delete_payload(0);
+            assert!(deleted.is_some());
             assert_eq!(storage.pages.len(), 1);
 
             let page = storage.pages.get(&1).unwrap();
