@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 
+#[derive(Debug)]
 pub struct PayloadStorage {
     page_tracker: PageTracker,
     pub(super) new_page_size: usize, // page size in bytes when creating new pages

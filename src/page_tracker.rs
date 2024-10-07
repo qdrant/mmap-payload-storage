@@ -25,11 +25,12 @@ impl PagePointer {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 struct PageTrackerHeader {
     max_point_offset: u32,
 }
 
+#[derive(Debug)]
 pub struct PageTracker {
     path: PathBuf,             // path to the file
     header: PageTrackerHeader, // header of the file
