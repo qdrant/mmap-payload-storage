@@ -531,9 +531,13 @@ impl SlottedPageMmap {
             return None;
         }
 
-        // mark slot as deleted
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
         let current_slot = self.get_slot(&slot_id).expect("Slot should exist");
+        if current_slot.deleted {
+            return None;
+        }
+        
+        // mark slot as deleted
         let updated_slot = SlotHeader {
             deleted: true,
             ..current_slot
@@ -548,7 +552,7 @@ impl SlottedPageMmap {
 
         self.write_page_header();
 
-        self.deleted_slots.push(slot_id, current_slot.length as u32);
+        self.deleted_slots.push(slot_id, updated_slot.length as u32);
 
         Some(())
     }
@@ -1031,20 +1035,27 @@ mod tests {
 
         let mut page = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
 
+        
+        // insert two values with different sizes
         let foo = Foo { bar: 1, qux: true }.to_bytes();
         let (slot_id, _) = page.insert_value(0, &foo).unwrap();
+        let foo_large = (0..=5).cycle().take(500).collect::<Vec<_>>();
+        let (slot_id_large, _) = page.insert_value(1, &foo_large).unwrap();
 
         let retrieved_value = page.get_value(&slot_id).unwrap();
-
         assert_eq!(retrieved_value, foo);
+        let retrieved_value_large = page.get_value(&slot_id_large).unwrap();
+        assert_eq!(retrieved_value_large, &foo_large);
+        
 
+        page.delete_value(slot_id_large);
         page.delete_value(slot_id);
 
         let foo2 = Foo { bar: 2, qux: false }.to_bytes();
         let (slot_id2, _) = page.insert_value(0, &foo2).unwrap();
 
-        // slot_id should be reused
-        assert_eq!(slot_id, slot_id2);
+        // largest slot_id should be reused
+        assert_eq!(slot_id_large, slot_id2);
 
         let retrieved_value2 = page.get_value(&slot_id2).unwrap();
 
