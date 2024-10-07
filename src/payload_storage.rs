@@ -265,6 +265,15 @@ impl PayloadStorage {
         std::fs::remove_dir_all(&self.base_path).unwrap();
     }
 
+    /// Flush all mmap pages to disk
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.page_tracker.flush()?;
+        for page in self.pages.values_mut() {
+            page.flush()?;
+        }
+        Ok(())
+    }
+
     /// Page ids with amount of fragmentation, ordered by most to least fragmentation
     fn pages_to_defrag(&self) -> Vec<(u32, usize)> {
         let mut fragmentation = self

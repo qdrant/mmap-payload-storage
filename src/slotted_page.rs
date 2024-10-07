@@ -117,8 +117,8 @@ impl SlottedPageMmap {
     }
 
     /// Flushes outstanding memory map modifications to disk.
-    fn flush(&self) {
-        self.mmap.flush().unwrap();
+    pub(crate) fn flush(&self) -> std::io::Result<()> {
+        self.mmap.flush()
     }
 
     /// Return all values in the page with placeholder or deleted values as `None`

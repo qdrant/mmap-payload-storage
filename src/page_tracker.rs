@@ -75,6 +75,10 @@ impl PageTracker {
         })
     }
 
+    pub fn flush(&self) -> std::io::Result<()> {
+        self.mmap.flush()
+    }
+
     /// Return the size of the underlying mmaped file
     pub fn mmap_file_size(&self) -> usize {
         self.mmap.len()
@@ -114,7 +118,7 @@ impl PageTracker {
         // check if file is long enough
         if self.mmap.len() < end_offset {
             // flush the current mmap
-            self.mmap.flush().unwrap();
+            self.flush().unwrap();
             let missing_space = end_offset - self.mmap.len();
             // reopen the file with a larger size
             // account for missing size + extra to avoid resizing too often
