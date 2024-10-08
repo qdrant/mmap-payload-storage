@@ -50,8 +50,9 @@ impl PageTracker {
             size > size_of::<PageTrackerHeader>(),
             "Size hint is too small"
         );
-        create_and_ensure_length(&path, size).unwrap();
-        let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal)).unwrap();
+        create_and_ensure_length(&path, size).expect("Failed to create page tracker file");
+        let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal))
+            .expect("Failed to open page tracker mmap");
         let header = PageTrackerHeader::default();
         let mut page_tracker = Self { path, header, mmap };
         page_tracker.write_header();
