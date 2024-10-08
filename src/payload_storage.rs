@@ -182,8 +182,10 @@ impl PayloadStorage {
         self.page_tracker.get(point_offset)
     }
 
-    /// Put a payload in the storage
-    pub fn put_payload(&mut self, point_offset: PointOffset, payload: &Payload) {
+    /// Put a payload in the storage.
+    ///
+    /// Returns true if the payload existed previously and was updated, false if it was newly inserted.
+    pub fn put_payload(&mut self, point_offset: PointOffset, payload: &Payload) -> bool {
         let payload_bytes = payload.to_bytes();
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
@@ -217,6 +219,8 @@ impl PayloadStorage {
                 self.page_tracker
                     .set(point_offset, PagePointer::new(other_page_id, new_slot_id));
             }
+
+            true
         } else {
             // this is a new payload
             let page_id = self
@@ -237,11 +241,15 @@ impl PayloadStorage {
             // update page_tracker
             self.page_tracker
                 .set(point_offset, PagePointer::new(page_id, slot_id));
+
+            false
         }
     }
 
     /// Delete a payload from the storage
+    ///
     /// Returns None if the point_offset, page, or payload was not found
+    ///
     /// Returns the deleted payload otherwise
     pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<Payload> {
         let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
