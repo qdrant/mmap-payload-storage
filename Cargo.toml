@@ -27,7 +27,7 @@ name = "storage_bench"
 harness = false
 
 [[bench]]
-name = "vs_rocksdb"
+name = "bustle"
 harness = false
 
 [profile.bench]
