@@ -443,6 +443,25 @@ impl PayloadStorage {
         // add page to hashmap
         self.add_page(page_id, page);
     }
+
+    pub fn iter<F>(&self, mut callback: F) -> std::io::Result<()>
+    where
+        F: FnMut(PointOffset, &Payload) -> std::io::Result<bool>,
+    {
+        for page in self.pages.values() {
+            for (slot, value) in page.iter_slot_values_starting_from(0) {
+                if let Some(value) = value {
+                    let decompressed = Self::decompress(value);
+                    let payload = Payload::from_bytes(&decompressed);
+                    let point_offset = slot.point_offset();
+                    if !callback(point_offset, &payload)? {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
