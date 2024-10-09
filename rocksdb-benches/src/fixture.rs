@@ -91,8 +91,8 @@ impl<S: SequentialCollectionHandle> CollectionHandle for ArcStorage<S> {
 
         proxy.maybe_flush();
 
-        let internal_id = match proxy.id_tracker.remove(key) {
-            Some(internal_id) => internal_id,
+        let internal_id = match proxy.id_tracker.get(key) {
+            Some(internal_id) => *internal_id,
             None => return false,
         };
 
