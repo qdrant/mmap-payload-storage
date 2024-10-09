@@ -58,8 +58,8 @@ impl PayloadStorage {
             base_path: path.clone(),
         };
         for page_id in page_ids {
-            let page_path = &path.join(format!("slotted-paged-{}.dat", page_id));
-            let slotted_page = SlottedPageMmap::open(page_path).expect("Page not found");
+            let page_path = storage.page_path(page_id);
+            let slotted_page = SlottedPageMmap::open(&page_path).expect("Page not found");
 
             storage.add_page(page_id, slotted_page);
         }
@@ -73,7 +73,7 @@ impl PayloadStorage {
     /// Get the path for a given page id
     pub fn page_path(&self, page_id: u32) -> PathBuf {
         self.base_path
-            .join(format!("slotted-paged-{}.dat", page_id))
+            .join(format!("slotted_paged_{}.dat", page_id))
     }
 
     /// Add a page to the storage. If it already exists, returns false
