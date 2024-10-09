@@ -32,6 +32,19 @@ impl PayloadStorage {
         lz4_flex::decompress_size_prepended(value).unwrap()
     }
 
+    pub fn files(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(self.pages.len() + 1);
+        // page tracker file
+        for tracker_file in self.page_tracker.files() {
+            paths.push(tracker_file);
+        }
+        // slotted pages files
+        for pages in self.pages.keys() {
+            paths.push(self.page_path(*pages));
+        }
+        paths
+    }
+
     pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
         Self {
             page_tracker: PageTracker::new(&path, None),

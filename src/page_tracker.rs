@@ -41,10 +41,18 @@ impl PageTracker {
     const FILE_NAME: &'static str = "page_tracker.dat";
     const DEFAULT_SIZE: usize = 1024 * 1024; // 1MB
 
+    pub fn files(&self) -> Vec<PathBuf> {
+        vec![Self::tracker_file_name(&self.path)]
+    }
+
+    fn tracker_file_name(path: &Path) -> PathBuf {
+        path.join(Self::FILE_NAME)
+    }
+
     /// Create a new PageTracker at the given dir path
     /// The file is created with the default size if no size hint is given
     pub fn new(path: &Path, size_hint: Option<usize>) -> Self {
-        let path = path.join(Self::FILE_NAME);
+        let path = Self::tracker_file_name(path);
         let size = size_hint.unwrap_or(Self::DEFAULT_SIZE);
         assert!(
             size > size_of::<PageTrackerHeader>(),
@@ -62,7 +70,7 @@ impl PageTracker {
     /// Open an existing PageTracker at the given path
     /// If the file does not exist, return None
     pub fn open(path: &Path) -> Option<Self> {
-        let path = path.join(Self::FILE_NAME);
+        let path = Self::tracker_file_name(path);
         if !path.exists() {
             return None;
         }
