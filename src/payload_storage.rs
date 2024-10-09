@@ -531,6 +531,24 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_files() {
+        let (_dir, mut storage) = empty_storage();
+
+        let mut payload = Payload::default();
+        payload
+            .0
+            .insert("key".to_string(), Value::String("value".to_string()));
+
+        storage.put_payload(0, &payload);
+        assert_eq!(storage.pages.len(), 1);
+        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        let files = storage.files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].file_name().unwrap(), "page_tracker.dat");
+        assert_eq!(files[1].file_name().unwrap(), "slotted_paged_1.dat");
+    }
+
+    #[test]
     fn test_put_payload() {
         let (_dir, mut storage) = empty_storage();
 

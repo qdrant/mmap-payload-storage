@@ -42,7 +42,7 @@ impl PageTracker {
     const DEFAULT_SIZE: usize = 1024 * 1024; // 1MB
 
     pub fn files(&self) -> Vec<PathBuf> {
-        vec![Self::tracker_file_name(&self.path)]
+        vec![self.path.clone()]
     }
 
     fn tracker_file_name(path: &Path) -> PathBuf {
@@ -205,7 +205,25 @@ impl PageTracker {
 mod tests {
     use crate::page_tracker::{PagePointer, PageTracker};
     use rstest::rstest;
+    use std::path::PathBuf;
     use tempfile::Builder;
+
+    #[test]
+    fn test_file_name() {
+        let path: PathBuf = "/tmp/test".into();
+        let file_name = PageTracker::tracker_file_name(&path);
+        assert_eq!(file_name, path.join(PageTracker::FILE_NAME));
+    }
+
+    #[test]
+    fn test_page_tracker_files() {
+        let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
+        let path = file.path();
+        let tracker = PageTracker::new(path, None);
+        let files = tracker.files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], path.join(PageTracker::FILE_NAME));
+    }
 
     #[test]
     fn test_new_tracker() {
