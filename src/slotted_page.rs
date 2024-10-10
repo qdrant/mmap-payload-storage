@@ -4,6 +4,7 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
+use priority_queue::PriorityQueue;
 use std::cmp::max;
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,9 @@ struct SlottedPageHeader {
 
     /// The number of bytes in between the data.
     fragmented_bytes: u64,
+
+    /// The number of slots that are marked as deleted in the page
+    deleted_slots_count: u32,
 }
 
 impl SlottedPageHeader {
@@ -31,6 +35,7 @@ impl SlottedPageHeader {
             data_start_offset: required_size as u64,
             page_size: required_size as u64,
             fragmented_bytes: 0,
+            deleted_slots_count: 0,
         }
     }
 
@@ -85,11 +90,18 @@ impl SlotHeader {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LargestSlot {
+    pub slot_id: SlotId,
+    pub length: u64,
+}
+
 #[derive(Debug)]
 pub(crate) struct SlottedPageMmap {
     path: PathBuf,
     header: SlottedPageHeader,
     mmap: MmapMut,
+    deleted_slots: PriorityQueue<SlotId, u32>,
 }
 
 impl SlottedPageMmap {
@@ -140,8 +152,7 @@ impl SlottedPageMmap {
             panic!("Slot id out of bounds")
         }
 
-        (slot_id as u64..self.header.slot_count).map(move |i| {
-            let slot = self.get_slot_ref(&(i as u32)).unwrap();
+        self.iter_slots_starting_from(slot_id).map(move |slot| {
             let value = if slot.deleted {
                 None
             } else {
@@ -150,6 +161,15 @@ impl SlottedPageMmap {
 
             (slot, value)
         })
+    }
+
+    fn iter_slots_starting_from(&self, slot_id: SlotId) -> impl Iterator<Item = &SlotHeader> + '_ {
+        if slot_id as u64 >= self.header.slot_count && self.header.slot_count > 0 {
+            panic!("Slot id out of bounds")
+        }
+
+        (slot_id as u64..self.header.slot_count)
+            .map(move |i| self.get_slot_ref(&(i as u32)).unwrap())
     }
 
     /// Returns all non deleted values in the page. `None` values means that the slot is a placeholder
@@ -187,7 +207,13 @@ impl SlottedPageMmap {
         create_and_ensure_length(path, page_size).unwrap();
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
         let path = path.to_path_buf();
-        let mut slotted_mmap = SlottedPageMmap { path, header, mmap };
+        let deleted_slots = PriorityQueue::new();
+        let mut slotted_mmap = SlottedPageMmap {
+            path,
+            header,
+            mmap,
+            deleted_slots,
+        };
         slotted_mmap.write_page_header();
         slotted_mmap
     }
@@ -203,7 +229,24 @@ impl SlottedPageMmap {
             transmute_from_u8(&mmap[0..size_of::<SlottedPageHeader>()]);
         let header = header.clone();
         let path = path.to_path_buf();
-        Some(SlottedPageMmap { path, header, mmap })
+        let mut page = SlottedPageMmap {
+            path,
+            header,
+            mmap,
+            deleted_slots: PriorityQueue::new(),
+        };
+
+        // Populate the deleted slots queue
+        let mut deleted_slots = PriorityQueue::new();
+        for (slot, slot_id) in page.iter_slots_starting_from(0).zip(0u32..) {
+            if slot.deleted {
+                deleted_slots.push(slot_id, slot.length as u32);
+            }
+        }
+
+        page.deleted_slots = deleted_slots;
+
+        Some(page)
     }
 
     /// Get value associated with the slot id.
@@ -259,7 +302,7 @@ impl SlottedPageMmap {
     }
 
     /// Check if there is enough space for a new slot + value
-    fn has_capacity_for_value(&self, extra_len: usize) -> bool {
+    fn has_capacity_for_new_value(&self, extra_len: usize) -> bool {
         self.free_space() >= SlotHeader::size_in_bytes() + extra_len
     }
 
@@ -272,6 +315,19 @@ impl SlottedPageMmap {
         data_start_offset
             .checked_sub(last_slot_offset)
             .expect("this should never overflow, otherwise the page is corrupted")
+    }
+
+    pub fn deleted_slots_count(&self) -> usize {
+        self.header.deleted_slots_count as usize
+    }
+
+    pub fn largest_deleted_slot(&self) -> Option<LargestSlot> {
+        self.deleted_slots
+            .peek()
+            .map(|(slot_id, length)| LargestSlot {
+                slot_id: *slot_id,
+                length: *length as u64,
+            })
     }
 
     pub fn size(&self) -> usize {
@@ -319,7 +375,7 @@ impl SlottedPageMmap {
     }
 
     /// Insert a new placeholder into the page
-    pub fn insert_placeholder_value(&mut self, point_id: u32) -> Option<SlotId> {
+    pub fn insert_placeholder_value(&mut self, point_id: u32) -> Option<(SlotId, bool)> {
         self.insert_value(point_id, &SlottedPageMmap::PLACEHOLDER_VALUE)
     }
 
@@ -327,8 +383,12 @@ impl SlottedPageMmap {
     ///
     /// Returns
     /// - None if there is not enough space for a new slot + value
-    /// - Some(slot_id) if the value was successfully added
-    pub fn insert_value(&mut self, point_offset: PointOffset, value: &[u8]) -> Option<SlotId> {
+    /// - Some((slot_id, is_new)) if the value was successfully added, and whether it was a new slot or it reused a deleted slot
+    pub fn insert_value(
+        &mut self,
+        point_offset: PointOffset,
+        value: &[u8],
+    ) -> Option<(SlotId, bool)> {
         // size of the value in bytes
         let real_value_size = value.len();
 
@@ -338,8 +398,42 @@ impl SlottedPageMmap {
         // actual value size accounting for the minimum value size
         let value_len = real_value_size + padding;
 
+        // Choose between reusing a deleted slot or using the free space
+        if let Some(largest_deleted_slot) = self.largest_deleted_slot() {
+            if largest_deleted_slot.length >= value_len as u64 {
+                return self
+                    .insert_value_in_deleted_slot(
+                        largest_deleted_slot.slot_id,
+                        point_offset,
+                        value,
+                        padding,
+                    )
+                    .map(|slot_id| (slot_id, false));
+            }
+        }
+
+        self.insert_new_value(point_offset, value, padding)
+            .map(|slot_id| (slot_id, true))
+    }
+
+    /// Insert a new value into the page
+    ///
+    /// Returns
+    /// - None if there is not enough space for a new slot + value
+    /// - Some(slot_id) if the value was successfully added
+    pub fn insert_new_value(
+        &mut self,
+        point_offset: PointOffset,
+        value: &[u8],
+        padding: usize,
+    ) -> Option<SlotId> {
+        let real_value_size = value.len();
+
+        // actual value size accounting for the minimum value size
+        let value_len = real_value_size + padding;
+
         // check if there is enough space for the value
-        if !self.has_capacity_for_value(value_len) {
+        if !self.has_capacity_for_new_value(value_len) {
             return None;
         }
 
@@ -374,6 +468,62 @@ impl SlottedPageMmap {
         Some(next_slot_id)
     }
 
+    /// Reuse a deleted slot for insertion
+    fn insert_value_in_deleted_slot(
+        &mut self,
+        slot_id: SlotId,
+        point_offset: PointOffset,
+        value: &[u8],
+        padding: usize,
+    ) -> Option<SlotId> {
+        if slot_id as u64 >= self.header.slot_count {
+            // Can't be a deleted slot if it's a new slot
+            return None;
+        }
+        let real_value_size = value.len();
+        let value_len = real_value_size + padding;
+
+        let deleted_slot = self.get_slot_ref(&slot_id).unwrap();
+        if !deleted_slot.deleted {
+            return None;
+        }
+        if deleted_slot.length < value_len as u64 {
+            return None;
+        }
+
+        let value_offset = deleted_slot.offset as usize;
+
+        // add slot
+        let slot = SlotHeader::new(
+            point_offset,
+            value_offset as u64,
+            value_len as u64,
+            padding as u8,
+            false,
+        );
+        self.write_slot(slot_id, slot);
+
+        // set value region
+        let value_end = value_offset + real_value_size;
+        self.mmap[value_offset..value_end].copy_from_slice(value);
+
+        // set right padding for values that are smaller than the minimum value size
+        if padding > 0 {
+            self.mmap[value_end..value_end + padding].copy_from_slice(&vec![0; padding]);
+        }
+
+        // update header
+        self.header.fragmented_bytes = self
+            .header
+            .fragmented_bytes
+            .saturating_sub(value_len as u64);
+        self.header.deleted_slots_count = self.header.deleted_slots_count.saturating_sub(1);
+        self.write_page_header();
+
+        self.deleted_slots.remove(&slot_id);
+        Some(slot_id)
+    }
+
     /// Mark a slot as deleted.
     pub fn delete_value(&mut self, slot_id: SlotId) -> Option<()> {
         let slot_count = self.header.slot_count;
@@ -381,9 +531,13 @@ impl SlottedPageMmap {
             return None;
         }
 
-        // mark slot as deleted
         let (slot_start, slot_end) = self.offsets_for_slot(slot_id);
         let current_slot = self.get_slot(&slot_id).expect("Slot should exist");
+        if current_slot.deleted {
+            return None;
+        }
+
+        // mark slot as deleted
         let updated_slot = SlotHeader {
             deleted: true,
             ..current_slot
@@ -392,7 +546,13 @@ impl SlottedPageMmap {
 
         // update fragmentation
         self.header.fragmented_bytes += updated_slot.length;
+
+        // update deleted slots count
+        self.header.deleted_slots_count += 1;
+
         self.write_page_header();
+
+        self.deleted_slots.push(slot_id, updated_slot.length as u32);
 
         Some(())
     }
@@ -552,7 +712,7 @@ mod tests {
 
         let expected_slot_count = 13_796;
         assert_eq!(mmap.header.slot_count, expected_slot_count);
-        assert_eq!(mmap.free_space(), 128); // not enough space for a new slot + placeholder value
+        assert_eq!(mmap.free_space(), 120); // not enough space for a new slot + placeholder value
 
         // can't add more values
         assert_eq!(
@@ -589,7 +749,7 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 10);
-        assert_eq!(mmap.free_space(), 2_095_600);
+        assert_eq!(mmap.free_space(), 2_095_592);
 
         // read slots
         let slot = mmap.get_slot(&0).unwrap();
@@ -635,7 +795,7 @@ mod tests {
         }
 
         assert_eq!(mmap.header.slot_count, 100);
-        assert_eq!(mmap.free_space(), 2_081_920);
+        assert_eq!(mmap.free_space(), 2_081_912);
 
         // read slots & values
         let slot = mmap.get_slot(&0).unwrap();
@@ -862,5 +1022,42 @@ mod tests {
             page_size,
             128 + size_of::<SlottedPageHeader>() + SlotHeader::size_in_bytes()
         );
+    }
+
+    #[test]
+    fn test_reuse_deleted_slot() {
+        let file = Builder::new()
+            .prefix("test-pages")
+            .suffix(".data")
+            .tempfile()
+            .unwrap();
+        let path = file.path();
+
+        let mut page = SlottedPageMmap::new(path, TEST_PAGE_SIZE);
+
+        // insert two values with different sizes
+        let foo = Foo { bar: 1, qux: true }.to_bytes();
+        let (slot_id, _) = page.insert_value(0, &foo).unwrap();
+        let foo_large = (0..=5).cycle().take(500).collect::<Vec<_>>();
+        let (slot_id_large, _) = page.insert_value(1, &foo_large).unwrap();
+
+        let retrieved_value = page.get_value(&slot_id).unwrap();
+        assert_eq!(retrieved_value, foo);
+        let retrieved_value_large = page.get_value(&slot_id_large).unwrap();
+        assert_eq!(retrieved_value_large, &foo_large);
+
+        page.delete_value(slot_id_large);
+        page.delete_value(slot_id);
+
+        let foo2 = Foo { bar: 2, qux: false }.to_bytes();
+        let (slot_id2, _) = page.insert_value(0, &foo2).unwrap();
+
+        // largest slot_id should be reused
+        assert_eq!(slot_id_large, slot_id2);
+
+        let retrieved_value2 = page.get_value(&slot_id2).unwrap();
+
+        // new value should be retrieved
+        assert_eq!(retrieved_value2, foo2);
     }
 }
