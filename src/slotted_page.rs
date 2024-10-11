@@ -4,7 +4,6 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
-use std::cmp::max;
 use std::path::{Path, PathBuf};
 
 pub type SlotId = u32;
@@ -42,28 +41,23 @@ impl SlottedPageHeader {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlotHeader {
     offset: u64,               // offset in the page (8 bytes)
-    length: u64,               // length of the value (8 bytes)
+    length: u64,               // length of the cell (8 bytes)
     point_offset: PointOffset, // point id (4 bytes)
-    right_padding: u8,         // padding within the value for small values (1 byte)
-    deleted: bool,             // whether the value has been deleted (1 byte)
-    _align: [u8; 2],           // 2 bytes padding for alignment
+    right_padding: u16, // right padding within the cell, which is not part of the value (2 byte)
+    deleted: bool,      // whether the value has been deleted (1 byte)
+    _align: [u8; 1],    // 1 byte for alignment
 }
 
 impl SlotHeader {
-    pub const fn size_in_bytes() -> usize {
-        size_of::<Self>()
-        // 24 // 8 + 8 + 4 + 1 + 1 + 2 padding
-    }
-
     fn new(
         point_offset: PointOffset,
         offset: u64,
         length: u64,
-        right_padding: u8,
+        right_padding: u16,
         deleted: bool,
     ) -> SlotHeader {
         assert!(
-            length >= SlottedPageMmap::MIN_VALUE_SIZE_BYTES as u64,
+            length >= SlottedPageMmap::MIN_CELL_SIZE_BYTES as u64,
             "Value too small"
         );
         SlotHeader {
@@ -72,7 +66,7 @@ impl SlotHeader {
             length,
             right_padding,
             deleted,
-            _align: [0; 2],
+            _align: [0; 1],
         }
     }
 
@@ -96,24 +90,28 @@ impl SlottedPageMmap {
     /// Expect JSON values to have roughly 3–5 fields with mostly small values.
     /// Therefore, reserve 128 bytes for each value in order to avoid frequent reallocations.
     /// For 1M values, this would require 128MB of memory.
-    const MIN_VALUE_SIZE_BYTES: usize = 128;
+    const MIN_CELL_SIZE_BYTES: usize = 128;
 
     /// Placeholder value for empty slots
-    const PLACEHOLDER_VALUE: [u8; SlottedPageMmap::MIN_VALUE_SIZE_BYTES] =
-        [0; SlottedPageMmap::MIN_VALUE_SIZE_BYTES];
+    const PLACEHOLDER_VALUE: [u8; SlottedPageMmap::MIN_CELL_SIZE_BYTES] =
+        [0; SlottedPageMmap::MIN_CELL_SIZE_BYTES];
 
     pub const FRAGMENTATION_THRESHOLD_RATIO: f32 = 0.5;
 
     /// Minimum new page size required for a value of the given size.
     pub fn new_page_size_for_value(value_size: usize) -> usize {
-        size_of::<SlottedPageHeader>() + Self::required_size_for_value(value_size)
+        size_of::<SlottedPageHeader>() + Self::required_space_for_new_value(value_size)
     }
 
-    /// Minimum new size required for a value of the given size.
-    pub fn required_size_for_value(value_size: usize) -> usize {
-        // The value size should be at least the minimum value size
-        let max_value = max(value_size, Self::MIN_VALUE_SIZE_BYTES);
-        max_value + size_of::<SlotHeader>()
+    /// Cell size required to store a value of the given size.
+    fn cell_size_for_value(value_size: usize) -> usize {
+        // The value size should be at least the minimum cell size, and always be a multiple of it.
+        value_size.next_multiple_of(Self::MIN_CELL_SIZE_BYTES)
+    }
+
+    /// Minimum free space required for a value of the given size.
+    pub fn required_space_for_new_value(value_size: usize) -> usize {
+        Self::cell_size_for_value(value_size) + size_of::<SlotHeader>()
     }
 
     /// Flushes outstanding memory map modifications to disk.
@@ -227,7 +225,7 @@ impl SlottedPageMmap {
         }
 
         let slot_offset =
-            size_of::<SlottedPageHeader>() + *slot_id as usize * SlotHeader::size_in_bytes();
+            size_of::<SlottedPageHeader>() + *slot_id as usize * size_of::<SlotHeader>();
         let start = slot_offset;
         let end = start + size_of::<SlotHeader>();
         let slot: &SlotHeader = transmute_from_u8(&self.mmap[start..end]);
@@ -238,7 +236,7 @@ impl SlottedPageMmap {
     /// Get value associated with the slot
     fn get_slot_value(&self, slot: &SlotHeader) -> Option<&[u8]> {
         let start = slot.offset;
-        // adjust the end to account for the left padding
+        // adjust the end to account for the right padding
         let end = start
             .checked_add(slot.length)
             .expect("start + length should not overflow")
@@ -255,19 +253,19 @@ impl SlottedPageMmap {
     /// Check if there is enough space for a new slot + min value
     #[cfg(test)]
     fn has_capacity_for_min_value(&self) -> bool {
-        self.free_space() >= SlotHeader::size_in_bytes() + SlottedPageMmap::MIN_VALUE_SIZE_BYTES
+        self.free_space() >= size_of::<SlotHeader>() + SlottedPageMmap::MIN_CELL_SIZE_BYTES
     }
 
-    /// Check if there is enough space for a new slot + value
-    fn has_capacity_for_value(&self, extra_len: usize) -> bool {
-        self.free_space() >= SlotHeader::size_in_bytes() + extra_len
+    /// Check if there is enough space for a new slot + cell
+    fn has_capacity_for_cell(&self, cell_size: usize) -> bool {
+        self.free_space() >= size_of::<SlotHeader>() + cell_size
     }
 
     /// Return the amount of free space in the page
     pub fn free_space(&self) -> usize {
         let slot_count = self.header.slot_count as usize;
         let last_slot_offset =
-            size_of::<SlottedPageHeader>() + slot_count * SlotHeader::size_in_bytes();
+            size_of::<SlottedPageHeader>() + slot_count * size_of::<SlotHeader>();
         let data_start_offset = self.header.data_start_offset as usize;
         data_start_offset
             .checked_sub(last_slot_offset)
@@ -289,20 +287,18 @@ impl SlottedPageMmap {
         let mut fragmented_space = 0;
 
         let mut slot_id = 0;
-        let mut last_offset = self.size() as u64;
         while let Some(slot) = self.get_slot_ref(&slot_id) {
             // if the slot is deleted, we can consider it empty space
             if slot.deleted {
                 fragmented_space += slot.length;
+            } else {
+                // check if the padding would fit other values.
+                let value_size = slot.length.saturating_sub(slot.right_padding as u64);
+                let ideal_cell_size = SlottedPageMmap::cell_size_for_value(value_size as usize);
+                fragmented_space += slot.length.saturating_sub(ideal_cell_size as u64);
             }
 
-            // check the empty space between the last slot and the end of the current slot
-            fragmented_space += last_offset
-                .checked_sub(slot.offset + slot.length)
-                .expect("last_offset should be to the right of the current slot end");
-
             // update for next iteration
-            last_offset = slot.offset;
             slot_id += 1;
         }
 
@@ -312,9 +308,9 @@ impl SlottedPageMmap {
     /// Compute the start and end offsets for the slot
     fn offsets_for_slot(&self, slot_id: SlotId) -> (usize, usize) {
         let slot_offset =
-            size_of::<SlottedPageHeader>() + slot_id as usize * SlotHeader::size_in_bytes();
+            size_of::<SlottedPageHeader>() + slot_id as usize * size_of::<SlotHeader>();
         let start = slot_offset;
-        let end = start + SlotHeader::size_in_bytes();
+        let end = start + size_of::<SlotHeader>();
         (start, end)
     }
 
@@ -330,21 +326,21 @@ impl SlottedPageMmap {
     /// - Some(slot_id) if the value was successfully added
     pub fn insert_value(&mut self, point_offset: PointOffset, value: &[u8]) -> Option<SlotId> {
         // size of the value in bytes
-        let real_value_size = value.len();
+        let value_size = value.len();
 
-        // padding to align the value to the end of the page
-        let padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
+        // The size of the data cell containing the value
+        let cell_size = Self::cell_size_for_value(value_size);
 
-        // actual value size accounting for the minimum value size
-        let value_len = real_value_size + padding;
-
-        // check if there is enough space for the value
-        if !self.has_capacity_for_value(value_len) {
+        // check if there is enough space for the new cell
+        if !self.has_capacity_for_cell(cell_size) {
             return None;
         }
 
+        // padding to align the value to the start of the cell
+        let padding = cell_size.saturating_sub(value_size);
+
         // data grows from the end of the page
-        let new_data_start_offset = self.header.data_start_offset as usize - value_len;
+        let new_data_start_offset = self.header.data_start_offset as usize - cell_size;
 
         // add slot
         let slot_count = self.header.slot_count;
@@ -352,17 +348,17 @@ impl SlottedPageMmap {
         let slot = SlotHeader::new(
             point_offset,
             new_data_start_offset as u64,
-            value_len as u64,
-            padding as u8,
+            cell_size as u64,
+            padding as u16,
             false,
         );
         self.write_slot(next_slot_id, slot);
 
         // set value region
-        let value_end = new_data_start_offset + real_value_size;
+        let value_end = new_data_start_offset + value_size;
         self.mmap[new_data_start_offset..value_end].copy_from_slice(value);
 
-        // set left padding for values that are smaller than the minimum value size
+        // set right padding to align with the minimum cell size
         if padding > 0 {
             self.mmap[value_end..value_end + padding].copy_from_slice(&vec![0; padding]);
         }
@@ -414,39 +410,41 @@ impl SlottedPageMmap {
         };
 
         // check if there is enough space for the new value
-        let real_value_size = new_value.len();
-        if real_value_size > slot.length as usize {
+        let value_size = new_value.len();
+        if value_size > slot.length as usize {
             return false;
         }
 
         // update value region
         let value_start = slot.offset as usize;
-        let value_end = value_start + real_value_size;
+        let value_end = value_start + value_size;
         self.mmap[value_start..value_end].copy_from_slice(new_value);
 
         // update padded region
-        let right_padding = SlottedPageMmap::MIN_VALUE_SIZE_BYTES.saturating_sub(real_value_size);
+        let cell_size = slot.length as usize;
+        let padding = cell_size
+            .checked_sub(value_size)
+            .expect("value_size should fit in cell_size");
         let padding_start = value_end;
-        let padding_end = padding_start + right_padding;
-        if right_padding > 0 {
-            self.mmap[padding_start..padding_end].copy_from_slice(&vec![0; right_padding]);
+        let padding_end = padding_start + padding;
+        if padding > 0 {
+            self.mmap[padding_start..padding_end].copy_from_slice(&vec![0; padding]);
         }
 
         // update slot
-        // actual value size accounting for the minimum value size
-        let value_len = real_value_size + right_padding;
         let update_slot = SlotHeader::new(
             slot.point_offset,
-            value_start as u64,  // new offset value
-            value_len as u64,    // new value size
-            right_padding as u8, // new padding
-            false,               // mark as non deleted
+            slot.offset as u64, // same offset value
+            slot.length,        // same cell size
+            padding as u16,     // new padding
+            false,              // mark as non deleted
         );
         self.write_slot(slot_id, update_slot);
 
         // update fragmentation
         // When the new value is smaller than the previous one, it will create unused space in the data region.
-        let unused_space = slot.length.saturating_sub(value_len as u64);
+        let ideal_cell_size = Self::cell_size_for_value(value_size);
+        let unused_space = slot.length.saturating_sub(ideal_cell_size as u64);
         if unused_space > 0 {
             self.header.fragmented_bytes += unused_space;
             self.write_page_header();
@@ -487,11 +485,6 @@ mod tests {
         pub fn from_bytes(data: &[u8]) -> Self {
             serde_cbor::from_slice(data).unwrap()
         }
-    }
-
-    #[test]
-    fn test_slot_size() {
-        assert_eq!(SlotHeader::size_in_bytes(), size_of::<SlotHeader>());
     }
 
     #[test]
@@ -790,12 +783,12 @@ mod tests {
 
         // create random slice larger than the placeholder value
         let mut rng = rand::thread_rng();
-        let large_value: Vec<u8> = (0..SlottedPageMmap::MIN_VALUE_SIZE_BYTES + 42)
+        let large_value: Vec<u8> = (0..SlottedPageMmap::MIN_CELL_SIZE_BYTES + 42)
             .map(|_| rng.gen())
             .collect();
 
         // update value from placeholder
-        assert!(large_value.len() > SlottedPageMmap::MIN_VALUE_SIZE_BYTES);
+        assert!(large_value.len() > SlottedPageMmap::MIN_CELL_SIZE_BYTES);
 
         // None because the new value is larger than the current value
         // The caller must delete and create a new value
@@ -832,12 +825,13 @@ mod tests {
 
         fragmented_space = mmap.fragmented_space();
 
-        // 250 values are deleted, so 250 * 200 bytes are fragmented
-        assert_eq!(fragmented_space, 250 * 200);
+        // 250 values are deleted, so 250 * cell_size bytes are fragmented
+        let big_cell_size = SlottedPageMmap::cell_size_for_value(big_value.len());
+        assert_eq!(fragmented_space, 250 * big_cell_size);
         assert_eq!(fragmented_space, mmap.calculate_fragmented_space());
 
         // update some values
-        let min_value = [1; SlottedPageMmap::MIN_VALUE_SIZE_BYTES];
+        let min_value = [1; SlottedPageMmap::MIN_CELL_SIZE_BYTES];
         for i in 0..500 {
             if i % 2 == 1 {
                 mmap.update_value(i, &min_value);
@@ -846,10 +840,10 @@ mod tests {
 
         fragmented_space = mmap.fragmented_space();
 
-        // 250 values are updated, so 250 * (200 - MIN_VALUE_SIZE_BYTES) bytes are fragmented.
+        // 250 values are updated, so 250 * (big_cell_size - MIN_VALUE_SIZE_BYTES) bytes are fragmented.
         // Plus the ones that were deleted before.
         let expected_fragmentation =
-            250 * (200 - SlottedPageMmap::MIN_VALUE_SIZE_BYTES) + 250 * 200;
+            250 * (big_cell_size - SlottedPageMmap::MIN_CELL_SIZE_BYTES) + 250 * big_cell_size;
         assert_eq!(fragmented_space, expected_fragmentation);
         assert_eq!(fragmented_space, mmap.calculate_fragmented_space());
     }
@@ -860,7 +854,7 @@ mod tests {
         let page_size = SlottedPageMmap::new_page_size_for_value(value_size);
         assert_eq!(
             page_size,
-            128 + size_of::<SlottedPageHeader>() + SlotHeader::size_in_bytes()
+            128 + size_of::<SlottedPageHeader>() + size_of::<SlotHeader>()
         );
     }
 }

@@ -120,7 +120,7 @@ impl PayloadStorage {
     }
 
     fn find_first_fitting_page(&self, payload_size: usize) -> Option<u32> {
-        let needed_size = SlottedPageMmap::required_size_for_value(payload_size);
+        let needed_space = SlottedPageMmap::required_space_for_new_value(payload_size);
 
         #[cfg(debug_assertions)]
         {
@@ -136,7 +136,7 @@ impl PayloadStorage {
 
         self.page_emptiness
             .peek()
-            .and_then(|(page_id, &free_space)| (free_space >= needed_size).then_some(*page_id))
+            .and_then(|(page_id, &free_space)| (free_space >= needed_space).then_some(*page_id))
     }
 
     /// Find the best fitting page for a payload
@@ -145,7 +145,7 @@ impl PayloadStorage {
         if self.pages.is_empty() {
             return None;
         }
-        let needed_size = SlottedPageMmap::required_size_for_value(payload_size);
+        let needed_size = SlottedPageMmap::required_space_for_new_value(payload_size);
         let mut best_page = 0;
         // best is the page with the lowest free space that fits the payload
         let mut best_fit_size = usize::MAX;
@@ -911,7 +911,7 @@ mod tests {
         // write the same payload a second time
         let point_offset = write_data(&mut storage, point_offset);
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
-        assert_eq!(storage.pages.len(), 3);
+        assert_eq!(storage.pages.len(), 4);
         assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent
@@ -923,7 +923,7 @@ mod tests {
         // reopen storage
         let mut storage = PayloadStorage::open(dir.path().to_path_buf(), None).unwrap();
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
-        assert_eq!(storage.pages.len(), 3);
+        assert_eq!(storage.pages.len(), 4);
         assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent after reopening
