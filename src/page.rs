@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use memmap2::MmapMut;
 
-use crate::utils_copied::{madvise::{Advice, AdviceSetting}, mmap_ops::{create_and_ensure_length, open_write_mmap}};
+use crate::utils_copied::{
+    madvise::{Advice, AdviceSetting},
+    mmap_ops::{create_and_ensure_length, open_write_mmap},
+};
 
 /// Offset within a page, in bytes.
 pub type PageOffset = u32;
@@ -19,14 +22,25 @@ pub(crate) struct PageMmap {
 
 impl PageMmap {
     /// Fixed size for pages. 32MB.
-    const PAGE_SIZE: usize = 32 * 1024 * 1024;
-    
+    pub const PAGE_SIZE: usize = 32 * 1024 * 1024;
+
     /// Create a new page at the given path
-    pub fn new(path: &Path) -> Self {
-        create_and_ensure_length(path, Self::PAGE_SIZE).unwrap();
+    pub fn new(path: &Path, size: usize) -> Self {
+        create_and_ensure_length(path, size).unwrap();
         let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
         let path = path.to_path_buf();
         Self { path, mmap }
+    }
+
+    /// Open an existing page at the given path
+    /// If the file does not exist, return None
+    pub fn open(path: &Path) -> Option<Self> {
+        if !path.exists() {
+            return None;
+        }
+        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
+        let path = path.to_path_buf();
+        Some(Self { path, mmap })
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -38,7 +52,7 @@ impl PageMmap {
         let end = (offset + length) as usize;
         &self.mmap[start..end]
     }
-    
+
     pub fn flush(&self) -> std::io::Result<()> {
         self.mmap.flush()
     }

@@ -1,19 +1,26 @@
-use crate::index::{Index, PageId, PointOffset, Pointer};
+use crate::index::{Index, PointOffset, Pointer};
 use crate::page::PageMmap;
 use crate::payload::Payload;
 use crate::slotted_page::{SlottedPageMmap};
 use lz4_flex::compress_prepend_size;
-use priority_queue::PriorityQueue;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct PayloadStorage {
+    /// Mapping of point_offset -> cell pointer
     index: Index,
-    pub(super) new_page_size: usize, // page size in bytes when creating new pages
-    pub(super) pages: HashMap<u32, PageMmap>, // page_id -> mmap page
+    
+    /// Page size in bytes when creating new pages
+    pub(super) new_page_size: usize,
+    
+    /// Mapping of page_id -> mmap page
+    pub(super) pages: HashMap<u32, PageMmap>,
+    
+    /// Maximum page id, useful when creating new pages
     max_page_id: u32,
-    pub(super) page_emptiness: PriorityQueue<PageId, usize>,
+    
+    /// Every file is in this directory
     base_path: PathBuf,
 }
 
@@ -44,10 +51,9 @@ impl PayloadStorage {
     pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
         Self {
             index: Index::new(&path, None),
-            new_page_size: page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
+            new_page_size: page_size.unwrap_or(PageMmap::PAGE_SIZE),
             pages: HashMap::new(),
             max_page_id: 0,
-            page_emptiness: PriorityQueue::new(),
             base_path: path,
         }
     }
@@ -60,17 +66,16 @@ impl PayloadStorage {
         // load pages
         let mut storage = Self {
             index: page_tracker,
-            new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
+            new_page_size: new_page_size.unwrap_or(PageMmap::PAGE_SIZE),
             pages: Default::default(),
             max_page_id: 0,
-            page_emptiness: Default::default(),
             base_path: path.clone(),
         };
         for page_id in page_ids {
             let page_path = storage.page_path(page_id);
-            let slotted_page = SlottedPageMmap::open(&page_path).expect("Page not found");
+            let page = PageMmap::open(&page_path).expect("Page not found");
 
-            storage.add_page(page_id, slotted_page);
+            storage.add_page(page_id, page);
         }
         Some(storage)
     }
@@ -82,7 +87,7 @@ impl PayloadStorage {
     /// Get the path for a given page id
     pub fn page_path(&self, page_id: u32) -> PathBuf {
         self.base_path
-            .join(format!("slotted_paged_{}.dat", page_id))
+            .join(format!("page_{}.dat", page_id))
     }
 
     /// Add a page to the storage. If it already exists, returns false
@@ -118,34 +123,6 @@ impl PayloadStorage {
         todo!("implement bitmask and regions to find empty gaps");
     }
 
-    /// Find the best fitting page for a payload
-    /// Returns Some(page_id) of the best fitting page or None if no page has enough space
-    // fn find_best_fitting_page(&self, payload_size: usize) -> Option<u32> {
-    //     if self.pages.is_empty() {
-    //         return None;
-    //     }
-    //     let needed_size = SlottedPageMmap::required_space_for_new_value(payload_size);
-    //     let mut best_page = 0;
-    //     // best is the page with the lowest free space that fits the payload
-    //     let mut best_fit_size = usize::MAX;
-
-    //     for (page_id, page) in &self.pages {
-    //         let free_space = page.free_space();
-    //         // select the smallest page that fits the payload
-    //         if free_space >= needed_size && free_space < best_fit_size {
-    //             best_page = *page_id;
-    //             best_fit_size = free_space;
-    //         }
-    //     }
-
-    //     // no page has enough capacity
-    //     if best_page == 0 {
-    //         None
-    //     } else {
-    //         Some(best_page)
-    //     }
-    // }
-
     /// Create a new page and return its id.
     /// If size is None, the page will have the default size
     ///
@@ -153,7 +130,7 @@ impl PayloadStorage {
     fn create_new_page(&mut self) -> u32 {
         let new_page_id = self.max_page_id + 1;
         let path = self.page_path(new_page_id);
-        let was_added = self.add_page(new_page_id, PageMmap::new(&path));
+        let was_added = self.add_page(new_page_id, PageMmap::new(&path, self.new_page_size));
         assert!(was_added);
 
         // TODO: add new available space to the bitmask
