@@ -1,5 +1,6 @@
 pub mod fixtures;
-mod page_tracker;
+mod index;
+mod page;
 pub mod payload;
 mod payload_storage;
 mod slotted_page;
