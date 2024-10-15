@@ -1,11 +1,8 @@
-use crate::page_tracker::{OffsetsToSlots, PageId, PagePointer, PageTracker, PointOffset};
+use crate::page_tracker::{PagePointer, PageTracker, PointOffset};
 use crate::payload::Payload;
-use crate::slotted_page::{SlotHeader, SlotId, SlottedPageMmap};
+use crate::slotted_page::SlottedPageMmap;
 use lz4_flex::compress_prepend_size;
-use priority_queue::PriorityQueue;
-use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -14,7 +11,6 @@ pub struct PayloadStorage {
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
     pub(super) pages: HashMap<u32, SlottedPageMmap>, // page_id -> mmap page
     max_page_id: u32,
-    pub(super) page_emptiness: PriorityQueue<PageId, usize>,
     base_path: PathBuf,
 }
 
@@ -51,7 +47,6 @@ impl PayloadStorage {
             new_page_size: page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages: HashMap::new(),
             max_page_id: 0,
-            page_emptiness: PriorityQueue::new(),
             base_path: path,
         }
     }
@@ -67,7 +62,6 @@ impl PayloadStorage {
             new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages: Default::default(),
             max_page_id: 0,
-            page_emptiness: Default::default(),
             base_path: path.clone(),
         };
         for page_id in page_ids {
@@ -96,9 +90,6 @@ impl PayloadStorage {
             return false;
         }
 
-        let previous = self.page_emptiness.push(page_id, page.free_space());
-        debug_assert!(previous.is_none());
-
         let previous = self.pages.insert(page_id, page);
         debug_assert!(previous.is_none());
 
@@ -117,54 +108,6 @@ impl PayloadStorage {
         let decompressed = Self::decompress(raw);
         let payload = Payload::from_bytes(&decompressed);
         Some(payload)
-    }
-
-    fn find_first_fitting_page(&self, payload_size: usize) -> Option<u32> {
-        let needed_space = SlottedPageMmap::required_space_for_new_value(payload_size);
-
-        #[cfg(debug_assertions)]
-        {
-            if let Some((page_id, free_space)) = self.page_emptiness.peek() {
-                debug_assert_eq!(
-                    self.pages.get(page_id).unwrap().free_space(),
-                    *free_space,
-                    "page id {} has a different computed free space than it is stored in pq",
-                    page_id
-                );
-            };
-        }
-
-        self.page_emptiness
-            .peek()
-            .and_then(|(page_id, &free_space)| (free_space >= needed_space).then_some(*page_id))
-    }
-
-    /// Find the best fitting page for a payload
-    /// Returns Some(page_id) of the best fitting page or None if no page has enough space
-    fn find_best_fitting_page(&self, payload_size: usize) -> Option<u32> {
-        if self.pages.is_empty() {
-            return None;
-        }
-        let needed_size = SlottedPageMmap::required_space_for_new_value(payload_size);
-        let mut best_page = 0;
-        // best is the page with the lowest free space that fits the payload
-        let mut best_fit_size = usize::MAX;
-
-        for (page_id, page) in &self.pages {
-            let free_space = page.free_space();
-            // select the smallest page that fits the payload
-            if free_space >= needed_size && free_space < best_fit_size {
-                best_page = *page_id;
-                best_fit_size = free_space;
-            }
-        }
-
-        // no page has enough capacity
-        if best_page == 0 {
-            None
-        } else {
-            Some(best_page)
-        }
     }
 
     /// Create a new page and return its id.
@@ -204,56 +147,25 @@ impl PayloadStorage {
         let payload_size = comp_payload.len();
 
         if let Some(PagePointer { page_id, slot_id }) = self.get_pointer(point_offset) {
-            let page = self.pages.get_mut(&page_id).unwrap();
-            let updated = page.update_value(slot_id, &comp_payload);
-            if !updated {
-                // delete slot
-                page.delete_value(slot_id);
+            // this is an update
 
-                // find a fitting page (or create a new one if all full)
-                let other_page_id =
-                    self.find_first_fitting_page(payload_size)
-                        .unwrap_or_else(|| {
-                            // create a new page
-                            self.create_new_page_for_payload(payload_size)
-                        });
-                let other_page = self.pages.get_mut(&other_page_id).unwrap();
-                let new_slot_id = other_page
-                    .insert_value(point_offset, &comp_payload)
-                    .unwrap();
-
-                // update page_emptiness
-                let previous_prio = self
-                    .page_emptiness
-                    .push(other_page_id, other_page.free_space());
-                debug_assert!(previous_prio.is_some());
-
-                // update page_tracker
-                self.page_tracker
-                    .set(point_offset, PagePointer::new(other_page_id, new_slot_id));
-            }
+            // TODO:
+            // - insert into a new cell
+            // - update the pointer
+            // - mark the old cell blocks as available in the bitmask
+            // - mark the new cell blocks as used in the bitmask
+            // - recompute bitmask gaps
 
             true
         } else {
             // this is a new payload
-            let page_id = self
-                .find_first_fitting_page(payload_size)
-                .unwrap_or_else(|| {
-                    // create a new page
-                    self.create_new_page_for_payload(payload_size)
-                });
 
-            let page = self.pages.get_mut(&page_id).unwrap();
-
-            let slot_id = page.insert_value(point_offset, &comp_payload).unwrap();
-
-            // update page_emptiness
-            self.page_emptiness
-                .change_priority(&page_id, page.free_space());
-
-            // update page_tracker
-            self.page_tracker
-                .set(point_offset, PagePointer::new(page_id, slot_id));
+            // TODO:
+            // - find page and offset which fits the payload
+            // - insert the payload
+            // - update the index
+            // - mark the cell blocks as used in the bitmask
+            // - recompute bitmask gaps
 
             false
         }
@@ -618,7 +530,7 @@ mod tests {
             let deleted = storage.delete_payload(0);
             assert!(deleted.is_some());
             assert_eq!(storage.pages.len(), 1);
-            
+
             assert!(storage.get_payload(0).is_none());
         }
 
