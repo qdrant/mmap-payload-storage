@@ -1,6 +1,6 @@
+use crate::page::Page;
 use crate::page_tracker::{PagePointer, PageTracker, PointOffset};
 use crate::payload::Payload;
-use crate::slotted_page::SlottedPageMmap;
 use lz4_flex::compress_prepend_size;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 pub struct PayloadStorage {
     page_tracker: PageTracker,
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
-    pub(super) pages: HashMap<u32, SlottedPageMmap>, // page_id -> mmap page
+    pub(super) pages: HashMap<u32, Page>, // page_id -> mmap page
     max_page_id: u32,
     base_path: PathBuf,
 }
@@ -66,7 +66,7 @@ impl PayloadStorage {
         };
         for page_id in page_ids {
             let page_path = storage.page_path(page_id);
-            let slotted_page = SlottedPageMmap::open(&page_path).expect("Page not found");
+            let slotted_page = Page::open(&page_path).expect("Page not found");
 
             storage.add_page(page_id, slotted_page);
         }
@@ -84,7 +84,7 @@ impl PayloadStorage {
     }
 
     /// Add a page to the storage. If it already exists, returns false
-    fn add_page(&mut self, page_id: u32, page: SlottedPageMmap) -> bool {
+    fn add_page(&mut self, page_id: u32, page: Page) -> bool {
         let page_exists = self.pages.contains_key(&page_id);
         if page_exists {
             return false;
@@ -117,7 +117,7 @@ impl PayloadStorage {
     fn create_new_page(&mut self, size: usize) -> u32 {
         let new_page_id = self.max_page_id + 1;
         let path = self.page_path(new_page_id);
-        let was_created = self.add_page(new_page_id, SlottedPageMmap::new(&path, size));
+        let was_created = self.add_page(new_page_id, Page::new(&path, size));
 
         assert!(was_created);
 
@@ -127,7 +127,7 @@ impl PayloadStorage {
     /// Create a new page adapted to the payload size and return its id.
     /// The page size will be the next power of two of the payload size, with a minimum of `self.page_size`.
     fn create_new_page_for_payload(&mut self, payload_size: usize) -> u32 {
-        let required_size = SlottedPageMmap::new_page_size_for_value(payload_size);
+        let required_size = Page::new_page_size_for_value(payload_size);
         // return the smallest power of two greater than or equal to the required size if it is greater than the default page size
         let real_size = self.new_page_size.max(required_size).next_power_of_two();
         self.create_new_page(real_size)

@@ -1,4 +1,4 @@
-use crate::slotted_page::SlotId;
+use crate::page::SlotId;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
