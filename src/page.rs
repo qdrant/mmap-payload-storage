@@ -1,9 +1,8 @@
+use crate::tracker::BlockOffset;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use memmap2::MmapMut;
 use std::path::{Path, PathBuf};
-
-pub type SlotId = u32;
 
 #[derive(Debug)]
 pub(crate) struct Page {
@@ -18,7 +17,7 @@ impl Page {
     const BLOCK_SIZE_BYTES: usize = 128;
 
     /// Cell size required to store a value of the given size.
-    fn cell_size_for_value(value_size: usize) -> usize {
+    pub fn cell_size_for_value(value_size: usize) -> usize {
         // The value size should be at least the minimum cell size, and always be a multiple of it.
         value_size.next_multiple_of(Self::BLOCK_SIZE_BYTES)
     }
@@ -81,28 +80,25 @@ impl Page {
         Some(())
     }
 
-    /// Read a cell from the page
+    /// Read a value from the page
     ///
     /// # Arguments
     /// - block_offset: The offset of the value in blocks
-    /// - num_blocks: The number of blocks the value occupies
+    /// - length: The number of blocks the value occupies
     ///
     /// # Returns
     /// - None if the value is not within the page
     /// - Some(slice) if the value was successfully read
-    pub fn read_cell(&self, block_offset: u32, num_blocks: u32) -> Option<&[u8]> {
-        // The size of the data cell containing the value
-        let cell_size = num_blocks as usize * Self::BLOCK_SIZE_BYTES;
-
+    pub fn read_value(&self, block_offset: BlockOffset, length: u32) -> Option<&[u8]> {
+        let value_start = block_offset as usize * Self::BLOCK_SIZE_BYTES;
         // check that the value is within the page
-        let cell_start = block_offset as usize * Self::BLOCK_SIZE_BYTES;
-        if cell_start + cell_size > self.mmap.len() {
+        if value_start + length as usize > self.mmap.len() {
             return None;
         }
 
         // read value region
-        let cell_end = cell_start + cell_size;
-        Some(&self.mmap[cell_start..cell_end])
+        let value_end = value_start + length as usize;
+        Some(&self.mmap[value_start..value_end])
     }
 
     /// Delete the page from the filesystem.

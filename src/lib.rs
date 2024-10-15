@@ -1,6 +1,6 @@
 pub mod fixtures;
 mod page;
-mod page_tracker;
+mod tracker;
 pub mod payload;
 mod payload_storage;
 mod stats;

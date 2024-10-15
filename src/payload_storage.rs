@@ -1,13 +1,13 @@
 use crate::page::Page;
-use crate::page_tracker::{PagePointer, PageTracker, PointOffset};
 use crate::payload::Payload;
+use crate::tracker::{PointOffset, Tracker, ValuePointer};
 use lz4_flex::compress_prepend_size;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct PayloadStorage {
-    page_tracker: PageTracker,
+    page_tracker: Tracker,
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
     pub(super) pages: HashMap<u32, Page>, // page_id -> mmap page
     max_page_id: u32,
@@ -43,7 +43,7 @@ impl PayloadStorage {
 
     pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
         Self {
-            page_tracker: PageTracker::new(&path, None),
+            page_tracker: Tracker::new(&path, None),
             new_page_size: page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
             pages: HashMap::new(),
             max_page_id: 0,
@@ -54,7 +54,8 @@ impl PayloadStorage {
     /// Open an existing PayloadStorage at the given path
     /// Returns None if the storage does not exist
     pub fn open(path: PathBuf, new_page_size: Option<usize>) -> Option<Self> {
-        let page_tracker = PageTracker::open(&path)?;
+        let page_tracker = Tracker::open(&path)?;
+        // TODO infer page ids from bitmask
         let page_ids = page_tracker.all_page_ids();
         // load pages
         let mut storage = Self {
@@ -102,9 +103,15 @@ impl PayloadStorage {
 
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
-        let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
+        let ValuePointer {
+            page_id,
+            block_offset,
+            length,
+        } = self.get_pointer(point_offset)?;
         let page = self.pages.get(&page_id).expect("Page not found");
-        let raw = page.get_value(&slot_id).expect("Slot not found");
+        let raw = page
+            .read_value(block_offset, length)
+            .expect("Cell not found");
         let decompressed = Self::decompress(raw);
         let payload = Payload::from_bytes(&decompressed);
         Some(payload)
@@ -124,17 +131,8 @@ impl PayloadStorage {
         new_page_id
     }
 
-    /// Create a new page adapted to the payload size and return its id.
-    /// The page size will be the next power of two of the payload size, with a minimum of `self.page_size`.
-    fn create_new_page_for_payload(&mut self, payload_size: usize) -> u32 {
-        let required_size = Page::new_page_size_for_value(payload_size);
-        // return the smallest power of two greater than or equal to the required size if it is greater than the default page size
-        let real_size = self.new_page_size.max(required_size).next_power_of_two();
-        self.create_new_page(real_size)
-    }
-
     /// Get the mapping for a given point offset
-    fn get_pointer(&self, point_offset: PointOffset) -> Option<PagePointer> {
+    fn get_pointer(&self, point_offset: PointOffset) -> Option<ValuePointer> {
         self.page_tracker.get(point_offset)
     }
 
@@ -146,7 +144,12 @@ impl PayloadStorage {
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
 
-        if let Some(PagePointer { page_id, slot_id }) = self.get_pointer(point_offset) {
+        if let Some(ValuePointer {
+            page_id,
+            block_offset,
+            length,
+        }) = self.get_pointer(point_offset)
+        {
             // this is an update
 
             // TODO:
@@ -177,16 +180,23 @@ impl PayloadStorage {
     ///
     /// Returns the deleted payload otherwise
     pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<Payload> {
-        let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
+        let ValuePointer {
+            page_id,
+            block_offset,
+            length,
+        } = self.get_pointer(point_offset)?;
         let page = self.pages.get_mut(&page_id).expect("Page not found");
         // get current value
-        let raw = page.get_value(&slot_id).expect("Slot not found");
+        let raw = page
+            .read_value(block_offset, length)
+            .expect("Value not found");
         let decompressed = Self::decompress(raw);
         let payload = Payload::from_bytes(&decompressed);
-        // delete value from page
-        page.delete_value(slot_id);
+
         // delete mapping
         self.page_tracker.unset(point_offset);
+
+        // TODO: mark the cell blocks as available in the bitmask AND recompute bitmask gaps
         Some(payload)
     }
 
@@ -204,23 +214,30 @@ impl PayloadStorage {
         for page in self.pages.values() {
             page.flush()?;
         }
+        // TODO: flush the bitmask AND the gaps
         Ok(())
     }
 
+    /// Iterate over all the payloads in the storage
     pub fn iter<F>(&self, mut callback: F) -> std::io::Result<()>
     where
         F: FnMut(PointOffset, &Payload) -> std::io::Result<bool>,
     {
-        for page in self.pages.values() {
-            for (slot, value) in page.iter_slot_values_starting_from(0) {
-                if let Some(value) = value {
-                    let decompressed = Self::decompress(value);
-                    let payload = Payload::from_bytes(&decompressed);
-                    let point_offset = slot.point_offset();
-                    if !callback(point_offset, &payload)? {
-                        return Ok(());
-                    }
-                }
+        for pointer in self.page_tracker.iter_pointers().filter_map(|x| x) {
+            let ValuePointer {
+                page_id,
+                block_offset,
+                length,
+            } = pointer;
+            
+            let page = self.pages.get(&page_id).expect("Page not found");
+            let raw = page
+                .read_value(block_offset, length)
+                .expect("Cell not found");
+            let decompressed = Self::decompress(raw);
+            let payload = Payload::from_bytes(&decompressed);
+            if !callback(block_offset, &payload)? {
+                return Ok(());
             }
         }
         Ok(())
