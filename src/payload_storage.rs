@@ -2,7 +2,13 @@ use crate::index::{Index, PointOffset, Pointer};
 use crate::page::PageMmap;
 use crate::payload::Payload;
 use crate::slotted_page::{SlottedPageMmap};
+use crate::utils_copied::madvise::{Advice, AdviceSetting};
+use crate::utils_copied::mmap_ops::open_write_mmap;
+use crate::utils_copied::mmap_type::MmapBitSlice;
+use bitvec::slice::BitSlice;
+use bitvec::vec::BitVec;
 use lz4_flex::compress_prepend_size;
+use memmap2::MmapMut;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -17,6 +23,11 @@ pub struct PayloadStorage {
     /// Mapping of page_id -> mmap page
     pub(super) pages: HashMap<u32, PageMmap>,
     
+    /// Each bit represents whether a block is used or not. 1 = used, 0 = free
+    /// 
+    /// This bitmask is global as if pages were contiguous.
+    used_mask: MmapBitSlice,
+    
     /// Maximum page id, useful when creating new pages
     max_page_id: u32,
     
@@ -25,6 +36,10 @@ pub struct PayloadStorage {
 }
 
 impl PayloadStorage {
+    
+    /// Block size in bytes
+    pub const BLOCK_SIZE: usize = 128;
+    
     /// LZ4 compression
     fn compress(value: &[u8]) -> Vec<u8> {
         compress_prepend_size(value)
@@ -49,10 +64,21 @@ impl PayloadStorage {
     }
 
     pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
+        let used_mask_path = Self::bitmask_path(path);
+        let bitvec = BitVec::new();
+        // TODO: how much space should we reserve for the bitmask?
+        let size = todo!();
+        create_and_ensure_length(&path, size).expect("Failed to create index file");
+        MmapBitSlice::create(&used_mask_path, &bitvec).expect("Failed to create bitmask file");
+        let mask_mmap = open_write_mmap(&used_mask_path, AdviceSetting::from(Advice::Normal))
+            .expect("Failed to open bitmask mmap");
+        let used_mask = MmapBitSlice::from(mask_mmap, 0);
+
         Self {
             index: Index::new(&path, None),
             new_page_size: page_size.unwrap_or(PageMmap::PAGE_SIZE),
             pages: HashMap::new(),
+            used_mask,
             max_page_id: 0,
             base_path: path,
         }
@@ -84,6 +110,10 @@ impl PayloadStorage {
         self.pages.is_empty()
     }
 
+    pub fn bitmask_path(dir: PathBuf) -> PathBuf {
+        dir.join("used_bitmask.dat")
+    }
+    
     /// Get the path for a given page id
     pub fn page_path(&self, page_id: u32) -> PathBuf {
         self.base_path
