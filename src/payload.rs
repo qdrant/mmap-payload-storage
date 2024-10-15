@@ -12,11 +12,13 @@ impl Default for Payload {
 
 impl Payload {
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_cbor::to_vec(self).unwrap()
+        let mut vec = Vec::new();
+        ciborium::ser::into_writer(self, &mut vec).unwrap();
+        vec
     }
 
     pub fn from_bytes(data: &[u8]) -> Self {
-        serde_cbor::from_slice(data).unwrap()
+        ciborium::de::from_reader(data).unwrap()
     }
 }
 
