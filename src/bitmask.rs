@@ -1,12 +1,11 @@
-use std::ops::{Range, RangeBounds};
+use std::ops::Range;
 use std::path::PathBuf;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
-use crate::tracker::PageId;
+use crate::tracker::{BlockOffset, PageId};
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use crate::utils_copied::mmap_type::MmapBitSlice;
-use crate::{page::Page, PayloadStorage};
 
 const BITMASK_NAME: &str = "bitmask.dat";
 
@@ -102,5 +101,23 @@ impl Bitmask {
         let bitslice = &self.mmap[range_of_page];
 
         bitslice.count_zeros() - bitslice.trailing_zeros()
+    }
+
+    pub(crate) fn find_available_blocks(&self, num_blocks: u32) -> Option<(PageId, BlockOffset)> {
+        todo!();
+    }
+
+    pub(crate) fn mark_blocks(
+        &mut self,
+        page_id: PageId,
+        block_offset: BlockOffset,
+        num_blocks: u32,
+        used: bool,
+    ) {
+        let page_start = Self::range_of_page(page_id, BLOCK_SIZE_BYTES).start;
+
+        let blocks_range = page_start + block_offset as usize..num_blocks as usize;
+
+        self.mmap[blocks_range].fill(used);
     }
 }

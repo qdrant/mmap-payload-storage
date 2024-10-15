@@ -1,7 +1,7 @@
 use crate::bitmask::Bitmask;
 use crate::page::Page;
 use crate::payload::Payload;
-use crate::tracker::{PageId, PointOffset, Tracker, ValuePointer};
+use crate::tracker::{BlockOffset, PageId, PointOffset, Tracker, ValuePointer};
 
 use lz4_flex::compress_prepend_size;
 use std::collections::HashMap;
@@ -157,6 +157,20 @@ impl PayloadStorage {
         self.page_tracker.get(point_offset)
     }
 
+    /// The number of blocks needed for a given value bytes size
+    fn blocks_for_value(value_size: usize) -> u32 {
+        value_size.div_ceil(BLOCK_SIZE_BYTES).try_into().unwrap()
+    }
+
+    fn find_or_create_available_blocks(&mut self, num_blocks: u32) -> (PageId, BlockOffset) {
+        loop {
+            if let Some((page_id, block_offset)) = self.bitmask.find_available_blocks(num_blocks) {
+                return (page_id, block_offset);
+            }
+            self.create_new_page();
+        }
+    }
+
     /// Put a payload in the storage.
     ///
     /// Returns true if the payload existed previously and was updated, false if it was newly inserted.
@@ -165,19 +179,40 @@ impl PayloadStorage {
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
 
-        if let Some(ValuePointer {
-            page_id,
-            block_offset,
-            length,
-        }) = self.get_pointer(point_offset)
-        {
+        let required_blocks = Self::blocks_for_value(payload_size);
+        let (start_page_id, block_offset) = self.find_or_create_available_blocks(required_blocks);
+
+        if let Some(old_pointer) = self.get_pointer(point_offset) {
             // this is an update
 
+            // insert into a new cell, considering that it can span more than one page
+            let mut unwritten_bytes = payload_size;
+            for page_id in start_page_id.. {
+                let page = self.pages.get_mut(&page_id).expect("Page not found");
+
+                let range = (payload_size - unwritten_bytes)..;
+                unwritten_bytes = page.write_value(block_offset, &comp_payload[range]);
+
+                if unwritten_bytes == 0 {
+                    break;
+                }
+            }
             // TODO:
-            // - insert into a new cell
             // - update the pointer
-            // - mark the old cell blocks as available in the bitmask
-            // - mark the new cell blocks as used in the bitmask
+
+            // mark new cell as used in the bitmask
+            self.bitmask
+                .mark_blocks(start_page_id, block_offset, required_blocks, true);
+
+            // mark old cell as available in the bitmask
+            self.bitmask.mark_blocks(
+                old_pointer.page_id,
+                old_pointer.block_offset,
+                Self::blocks_for_value(old_pointer.length as usize),
+                false,
+            );
+
+            // TODO:
             // - recompute bitmask gaps
 
             true
@@ -553,7 +588,9 @@ mod tests {
 
         {
             // the fitting page should be 64MB, so we should still have about 14MB of free space
-            let free_blocks = storage.bitmask.free_blocks_for_page(1, storage.new_page_size);
+            let free_blocks = storage
+                .bitmask
+                .free_blocks_for_page(1, storage.new_page_size);
             let expected_free_blocks = 1024 * 1024 * 14 / BLOCK_SIZE_BYTES;
             assert_eq!(free_blocks, expected_free_blocks);
         }

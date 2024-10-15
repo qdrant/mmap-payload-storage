@@ -4,7 +4,7 @@ use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use memmap2::MmapMut;
 use std::path::{Path, PathBuf};
-    
+
 #[derive(Debug)]
 pub(crate) struct Page {
     path: PathBuf,
@@ -12,7 +12,6 @@ pub(crate) struct Page {
 }
 
 impl Page {
-
     /// Cell size required to store a value of the given size.
     pub fn cell_size_for_value(value_size: usize) -> usize {
         // The value size should be at least the minimum cell size, and always be a multiple of it.
@@ -48,33 +47,28 @@ impl Page {
         Some(Page { path, mmap })
     }
 
-    /// Write a cell into the page
+    /// Write a value into the page
     ///
     /// # Returns
-    /// - None if there is not enough space for the new value
-    /// - Some(()) if the value was successfully added
+    /// Amount of bytes that didn't fit into the page
     ///
     /// # Corruption
     ///
     /// If the block_offset and length of the value are already taken, this function will still overwrite the data.
-    pub fn write_cell(&mut self, block_offset: u32, cell: &[u8]) -> Option<()> {
+    pub fn write_value(&mut self, block_offset: u32, value: &[u8]) -> usize {
         // The size of the data cell containing the value
-        let cell_size = cell.len();
+        let value_size = value.len();
 
-        // check the the cell size is a multiple of the block size
-        assert_eq!(cell_size % BLOCK_SIZE_BYTES, 0);
+        let value_start = block_offset as usize * BLOCK_SIZE_BYTES;
 
-        // check that the value fits in the page
-        let cell_start = block_offset as usize * BLOCK_SIZE_BYTES;
-        if cell_start + cell_size > self.mmap.len() {
-            return None;
-        }
+        let value_end = value_start + value_size;
+        // only write what fits in the page
+        let unwritten_bytes = value_end.saturating_sub(self.mmap.len());
 
         // set value region
-        let cell_end = cell_start + cell_size;
-        self.mmap[cell_start..cell_end].copy_from_slice(cell);
+        self.mmap[value_start..value_end - unwritten_bytes].copy_from_slice(value);
 
-        Some(())
+        unwritten_bytes
     }
 
     /// Read a value from the page
