@@ -1,22 +1,29 @@
+use crate::bitmask::Bitmask;
 use crate::page::Page;
 use crate::payload::Payload;
-use crate::tracker::{PointOffset, Tracker, ValuePointer};
+use crate::tracker::{PageId, PointOffset, Tracker, ValuePointer};
+
 use lz4_flex::compress_prepend_size;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Expect JSON values to have roughly 3–5 fields with mostly small values.
+/// For 1M values, this would require 128MB of memory.
+pub const BLOCK_SIZE_BYTES: usize = 128;
 
 #[derive(Debug)]
 pub struct PayloadStorage {
     page_tracker: Tracker,
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
     pub(super) pages: HashMap<u32, Page>, // page_id -> mmap page
+    bitmask: Bitmask,
     max_page_id: u32,
     base_path: PathBuf,
 }
 
 impl PayloadStorage {
     /// Default page size used when not specified
-    const DEFAULT_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
+    pub const PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
 
     /// LZ4 compression
     fn compress(value: &[u8]) -> Vec<u8> {
@@ -41,31 +48,44 @@ impl PayloadStorage {
         paths
     }
 
+    /// Initializes a new storage with a single empty page.
     pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
-        Self {
+        let page_size = page_size.unwrap_or(Self::PAGE_SIZE_BYTES);
+        let mut storage = Self {
             page_tracker: Tracker::new(&path, None),
-            new_page_size: page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
+            new_page_size: page_size,
             pages: HashMap::new(),
+            bitmask: Bitmask::new(path.clone(), page_size),
             max_page_id: 0,
             base_path: path,
-        }
+        };
+
+        storage.create_new_page();
+
+        storage
     }
 
     /// Open an existing PayloadStorage at the given path
     /// Returns None if the storage does not exist
     pub fn open(path: PathBuf, new_page_size: Option<usize>) -> Option<Self> {
+        let new_page_size = new_page_size.unwrap_or(Self::PAGE_SIZE_BYTES);
+
         let page_tracker = Tracker::open(&path)?;
-        // TODO infer page ids from bitmask
-        let page_ids = page_tracker.all_page_ids();
+
+        let bitmask = Bitmask::open(path.clone());
+
+        let max_page_id = bitmask.infer_max_page_id(new_page_size);
+
         // load pages
         let mut storage = Self {
             page_tracker,
-            new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
+            new_page_size: new_page_size,
             pages: Default::default(),
+            bitmask,
             max_page_id: 0,
             base_path: path.clone(),
         };
-        for page_id in page_ids {
+        for page_id in 1..=max_page_id as PageId {
             let page_path = storage.page_path(page_id);
             let slotted_page = Page::open(&page_path).expect("Page not found");
 
@@ -80,8 +100,7 @@ impl PayloadStorage {
 
     /// Get the path for a given page id
     pub fn page_path(&self, page_id: u32) -> PathBuf {
-        self.base_path
-            .join(format!("slotted_paged_{}.dat", page_id))
+        self.base_path.join(format!("page_{}.dat", page_id))
     }
 
     /// Add a page to the storage. If it already exists, returns false
@@ -111,7 +130,7 @@ impl PayloadStorage {
         let page = self.pages.get(&page_id).expect("Page not found");
         let raw = page
             .read_value(block_offset, length)
-            .expect("Cell not found");
+            .expect("Value not found");
         let decompressed = Self::decompress(raw);
         let payload = Payload::from_bytes(&decompressed);
         Some(payload)
@@ -121,12 +140,14 @@ impl PayloadStorage {
     /// If size is None, the page will have the default size
     ///
     /// Returns the new page id
-    fn create_new_page(&mut self, size: usize) -> u32 {
+    fn create_new_page(&mut self) -> u32 {
         let new_page_id = self.max_page_id + 1;
         let path = self.page_path(new_page_id);
-        let was_created = self.add_page(new_page_id, Page::new(&path, size));
-
+        let page = Page::new(&path, self.new_page_size);
+        let was_created = self.add_page(new_page_id, page);
         assert!(was_created);
+
+        self.bitmask.cover_new_page(self.new_page_size);
 
         new_page_id
     }
@@ -229,7 +250,7 @@ impl PayloadStorage {
                 block_offset,
                 length,
             } = pointer;
-            
+
             let page = self.pages.get(&page_id).expect("Page not found");
             let raw = page
                 .read_value(block_offset, length)
@@ -531,15 +552,10 @@ mod tests {
         assert_eq!(stored_payload.unwrap(), payload);
 
         {
-            let page = storage.pages.get(&1).unwrap();
-
             // the fitting page should be 64MB, so we should still have about 14MB of free space
-            let free_space = page.free_space();
-            assert!(
-                free_space > 1024 * 1024 * 13 && free_space < 1024 * 1024 * 15,
-                "free space should be around 14MB, but it is: {}",
-                free_space
-            );
+            let free_blocks = storage.bitmask.free_blocks_for_page(1, storage.new_page_size);
+            let expected_free_blocks = 1024 * 1024 * 14 / BLOCK_SIZE_BYTES;
+            assert_eq!(free_blocks, expected_free_blocks);
         }
 
         {

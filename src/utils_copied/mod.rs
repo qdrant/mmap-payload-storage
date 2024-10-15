@@ -1,4 +1,5 @@
-#[allow(dead_code)]
+#![allow(dead_code)]
+
 pub mod madvise;
-#[allow(dead_code)]
 pub mod mmap_ops;
+pub mod mmap_type;

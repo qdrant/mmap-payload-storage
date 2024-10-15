@@ -1,9 +1,10 @@
+use crate::payload_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::BlockOffset;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use memmap2::MmapMut;
 use std::path::{Path, PathBuf};
-
+    
 #[derive(Debug)]
 pub(crate) struct Page {
     path: PathBuf,
@@ -11,15 +12,11 @@ pub(crate) struct Page {
 }
 
 impl Page {
-    /// Expect JSON values to have roughly 3–5 fields with mostly small values.
-    /// Therefore, reserve 128 bytes for each value in order to avoid frequent reallocations.
-    /// For 1M values, this would require 128MB of memory.
-    const BLOCK_SIZE_BYTES: usize = 128;
 
     /// Cell size required to store a value of the given size.
     pub fn cell_size_for_value(value_size: usize) -> usize {
         // The value size should be at least the minimum cell size, and always be a multiple of it.
-        value_size.next_multiple_of(Self::BLOCK_SIZE_BYTES)
+        value_size.next_multiple_of(BLOCK_SIZE_BYTES)
     }
 
     /// Minimum free space required for a value of the given size.
@@ -35,7 +32,7 @@ impl Page {
     /// Create a new page at the given path
     pub fn new(path: &Path, size: usize) -> Page {
         create_and_ensure_length(path, size).unwrap();
-        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
+        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal), false).unwrap();
         let path = path.to_path_buf();
         Page { path, mmap }
     }
@@ -46,7 +43,7 @@ impl Page {
         if !path.exists() {
             return None;
         }
-        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal)).unwrap();
+        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal), false).unwrap();
         let path = path.to_path_buf();
         Some(Page { path, mmap })
     }
@@ -65,10 +62,10 @@ impl Page {
         let cell_size = cell.len();
 
         // check the the cell size is a multiple of the block size
-        assert_eq!(cell_size % Self::BLOCK_SIZE_BYTES, 0);
+        assert_eq!(cell_size % BLOCK_SIZE_BYTES, 0);
 
         // check that the value fits in the page
-        let cell_start = block_offset as usize * Self::BLOCK_SIZE_BYTES;
+        let cell_start = block_offset as usize * BLOCK_SIZE_BYTES;
         if cell_start + cell_size > self.mmap.len() {
             return None;
         }
@@ -90,7 +87,7 @@ impl Page {
     /// - None if the value is not within the page
     /// - Some(slice) if the value was successfully read
     pub fn read_value(&self, block_offset: BlockOffset, length: u32) -> Option<&[u8]> {
-        let value_start = block_offset as usize * Self::BLOCK_SIZE_BYTES;
+        let value_start = block_offset as usize * BLOCK_SIZE_BYTES;
         // check that the value is within the page
         if value_start + length as usize > self.mmap.len() {
             return None;
