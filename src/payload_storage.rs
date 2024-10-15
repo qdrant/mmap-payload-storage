@@ -290,7 +290,7 @@ mod tests {
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
-        assert_eq!(page_mapping.slot_id, 0); // first slot
+        assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -356,7 +356,7 @@ mod tests {
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
-        assert_eq!(page_mapping.slot_id, 0); // first slot
+        assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
         assert_eq!(stored_payload, Some(payload));
@@ -386,7 +386,7 @@ mod tests {
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
-        assert_eq!(page_mapping.slot_id, 0); // first slot
+        assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -524,7 +524,7 @@ mod tests {
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
-        assert_eq!(page_mapping.slot_id, 0); // first slot
+        assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -574,7 +574,7 @@ mod tests {
 
             let page_mapping = storage.get_pointer(0).unwrap();
             assert_eq!(page_mapping.page_id, 1); // first page
-            assert_eq!(page_mapping.slot_id, 0); // first slot
+            assert_eq!(page_mapping.block_offset, 0); // first cell
 
             let stored_payload = storage.get_payload(0);
             assert!(stored_payload.is_some());

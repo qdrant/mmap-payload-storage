@@ -3,7 +3,6 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub type PointOffset = u32;
@@ -226,7 +225,6 @@ mod tests {
         assert!(tracker.is_empty());
         assert_eq!(tracker.mapping_len(), 0);
         assert_eq!(tracker.header_count(), 0);
-        assert_eq!(tracker.all_page_ids().len(), 0);
     }
 
     #[rstest]
@@ -326,7 +324,7 @@ mod tests {
             if i % 2 == 0 {
                 assert_eq!(
                     tracker.get(i as u32),
-                    Some(ValuePointer::new(i as u32, i as u32))
+                    Some(ValuePointer::new(i as u32, i as u32, i as u32))
                 );
             } else {
                 assert_eq!(tracker.get(i as u32), None);
@@ -347,7 +345,7 @@ mod tests {
         assert_eq!(tracker.mmap_file_size(), initial_tracker_size);
 
         for i in 0..100_000 {
-            tracker.set(i as u32, ValuePointer::new(i as u32, i as u32));
+            tracker.set(i, ValuePointer::new(i, i, i));
         }
         assert_eq!(tracker.mapping_len(), 100_000);
         assert!(tracker.mmap_file_size() > initial_tracker_size);
@@ -361,7 +359,7 @@ mod tests {
         let mut tracker = Tracker::new(path, None);
         assert_eq!(tracker.mapping_len(), 0);
 
-        let page_pointer = ValuePointer::new(1, 1);
+        let page_pointer = ValuePointer::new(1, 1, 1);
         let key = 1_000_000;
 
         tracker.set(key, page_pointer);
