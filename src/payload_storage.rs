@@ -295,176 +295,6 @@ impl PayloadStorage {
         Ok(())
     }
 
-    /// Page ids with amount of fragmentation, ordered by most to least fragmentation
-    fn pages_to_defrag(&self) -> Vec<(u32, usize)> {
-        let mut fragmentation = self
-            .pages
-            .iter()
-            .filter_map(|(page_id, page)| {
-                let frag_space = page.fragmented_space();
-
-                // check if we should defrag this page
-                let frag_threshold =
-                    SlottedPageMmap::FRAGMENTATION_THRESHOLD_RATIO * page.size() as f32;
-                if frag_space < frag_threshold.ceil() as usize {
-                    // page is not fragmented enough, skip
-                    return None;
-                }
-                Some((*page_id, frag_space))
-            })
-            .collect::<Vec<_>>();
-
-        // sort by most to least fragmented
-        fragmentation.sort_unstable_by_key(|(_, fragmented_space)| Reverse(*fragmented_space));
-
-        fragmentation
-    }
-
-    /// Compact the storage by defragmenting pages into new ones. Returns true if at least one page was defragmented.
-    pub fn compact_all(&mut self) -> bool {
-        // find out which pages should be compacted
-        let pages_to_defrag = self.pages_to_defrag();
-
-        if pages_to_defrag.is_empty() {
-            return false;
-        }
-
-        let mut pages_to_defrag = pages_to_defrag.into_iter();
-        let mut old_page_id = pages_to_defrag.next().unwrap().0;
-        let mut last_slot_id = 0;
-
-        // TODO: account for the fact that the first value could be larger than 32MB and the newly created page will
-        // immediately not be used? we don't want to create empty pages. But it is a quite rare case, so maybe we can just ignore it
-        let mut size_hint = self.new_page_size;
-
-        // This is a loop because we might need to create more pages if the current new page is full
-        'new_page: loop {
-            // create new page
-            let new_page_id = self.max_page_id + 1;
-            let mut new_page = SlottedPageMmap::new(&self.page_path(new_page_id), size_hint);
-
-            let mut pages_to_remove = Vec::new();
-            let mut slots_to_update: OffsetsToSlots = Vec::new();
-            // go over each page to defrag
-            'defrag_pages: loop {
-                match self.transfer_page_values(old_page_id, &mut new_page, last_slot_id) {
-                    ControlFlow::Break((new_slots, slot_id, hint)) => {
-                        // new page is full, insert this one and create a another one
-                        self.insert_compacted_page(new_page, new_page_id, new_slots);
-
-                        size_hint = hint.unwrap_or(self.new_page_size);
-                        last_slot_id = slot_id;
-                        continue 'new_page;
-                    }
-                    ControlFlow::Continue(new_slots) => slots_to_update.extend(new_slots),
-                };
-
-                pages_to_remove.push(old_page_id);
-
-                match pages_to_defrag.next() {
-                    Some((page_id, _defrag_space)) => {
-                        last_slot_id = 0;
-                        old_page_id = page_id;
-                    }
-                    // No more pages to defrag, end compaction
-                    None => break 'defrag_pages,
-                };
-            }
-
-            // insert page into hashmap, update page tracker
-            self.insert_compacted_page(new_page, new_page_id, slots_to_update);
-
-            for old_page_id in pages_to_remove {
-                // delete old page, page tracker shouldn't point to this page anymore.
-                self.pages.remove(&old_page_id).unwrap().delete_page();
-            }
-
-            break 'new_page;
-        }
-
-        true
-    }
-
-    /// Transfer all values from one page to the other, and update the page tracker.
-    ///
-    /// If the values do not fit, returns `ControlFlow::Break` with the pending slot id and a size hint to create another page.
-    fn transfer_page_values(
-        &mut self,
-        old_page_id: PageId,
-        new_page: &mut SlottedPageMmap,
-        from_slot_id: SlotId,
-    ) -> ControlFlow<(OffsetsToSlots, SlotId, Option<usize>), OffsetsToSlots> {
-        let mut current_slot_id = from_slot_id;
-
-        let old_page = self.pages.get(&old_page_id).unwrap();
-
-        let mut new_slots = Vec::new();
-
-        for (slot, value) in old_page.iter_slot_values_starting_from(current_slot_id) {
-            match Self::move_value(slot, value, new_page) {
-                ControlFlow::Break(size_hint) => {
-                    return ControlFlow::Break((new_slots, current_slot_id, size_hint));
-                }
-                ControlFlow::Continue(Some((point_offset, slot_id))) => {
-                    new_slots.push((point_offset, slot_id))
-                }
-                // point was skipped (deleted or empty slot)
-                ControlFlow::Continue(None) => {}
-            }
-
-            // prepare for next iteration
-            current_slot_id += 1;
-        }
-
-        ControlFlow::Continue(new_slots)
-    }
-
-    /// Move a value from one page to another.
-    ///
-    /// If the value does not fit in the new one, returns `ControlFlow::Break` with a size hint to create another page.
-    fn move_value(
-        current_slot: &SlotHeader,
-        value: Option<&[u8]>,
-        new_page: &mut SlottedPageMmap,
-    ) -> ControlFlow<Option<usize>, Option<(PointOffset, SlotId)>> {
-        let point_offset = current_slot.point_offset();
-
-        if current_slot.deleted() {
-            // value was deleted, skip
-            return ControlFlow::Continue(None);
-        }
-
-        let was_inserted = if let Some(value) = value {
-            new_page.insert_value(point_offset, value)
-        } else {
-            new_page.insert_placeholder_value(point_offset)
-        };
-
-        let Some(slot_id) = was_inserted else {
-            // new page is full, request to create a new one
-            let size_hint = value.map(|v| v.len());
-            return ControlFlow::Break(size_hint);
-        };
-
-        ControlFlow::Continue(Some((point_offset, slot_id)))
-    }
-
-    fn insert_compacted_page(
-        &mut self,
-        page: SlottedPageMmap,
-        page_id: PageId,
-        new_slots: Vec<(PointOffset, SlotId)>,
-    ) {
-        // update page tracker
-        for (point_offset, slot_id) in new_slots {
-            let new_pointer = PagePointer { page_id, slot_id };
-            self.page_tracker.set(point_offset, new_pointer);
-        }
-
-        // add page to hashmap
-        self.add_page(page_id, page);
-    }
-
     pub fn iter<F>(&self, mut callback: F) -> std::io::Result<()>
     where
         F: FnMut(PointOffset, &Payload) -> std::io::Result<bool>,
@@ -781,10 +611,6 @@ mod tests {
                 "free space should be around 14MB, but it is: {}",
                 free_space
             );
-
-            let fragmented_space = page.fragmented_space();
-            assert_eq!(fragmented_space, 0);
-            assert_eq!(fragmented_space, page.calculate_fragmented_space());
         }
 
         {
@@ -792,21 +618,9 @@ mod tests {
             let deleted = storage.delete_payload(0);
             assert!(deleted.is_some());
             assert_eq!(storage.pages.len(), 1);
-
-            let page = storage.pages.get(&1).unwrap();
-
-            // check fragmentation
-            let fragmented_space = page.fragmented_space();
-            assert!(
-                fragmented_space > 1024 * 1024 * 49 && fragmented_space < 1024 * 1024 * 51,
-                "free space should be around 50MB, but it is: {}",
-                fragmented_space
-            );
-            assert_eq!(fragmented_space, page.calculate_fragmented_space());
+            
+            assert!(storage.get_payload(0).is_none());
         }
-
-        // compact storage to remove fragmentation
-        storage.compact_all();
 
         // the page has been reclaimed completely
         assert!(!storage.pages.contains_key(&1));
@@ -947,65 +761,6 @@ mod tests {
         assert!(dir.path().exists());
         storage.wipe();
         assert!(!dir.path().exists());
-    }
-
-    #[test]
-    fn test_compaction() {
-        let (_dir, mut storage) = empty_storage();
-
-        let rng = &mut rand::thread_rng();
-        let max_point_offset = 20000;
-
-        let large_payloads = (0..max_point_offset)
-            .map(|_| random_payload(rng, 10))
-            .collect::<Vec<_>>();
-
-        for (i, payload) in large_payloads.iter().enumerate() {
-            storage.put_payload(i as u32, payload);
-        }
-
-        // sanity check
-        for (i, payload) in large_payloads.iter().enumerate() {
-            let stored_payload = storage.get_payload(i as u32);
-            assert_eq!(stored_payload.as_ref(), Some(payload));
-        }
-
-        // check no fragmentation
-        for page in storage.pages.values() {
-            assert_eq!(page.fragmented_space(), 0);
-            assert_eq!(page.calculate_fragmented_space(), 0);
-        }
-
-        // update with smaller values
-        let small_payloads = (0..max_point_offset)
-            .map(|_| random_payload(rng, 1))
-            .collect::<Vec<_>>();
-
-        for (i, payload) in small_payloads.iter().enumerate() {
-            storage.put_payload(i as u32, payload);
-        }
-
-        // sanity check
-        // check consistency
-        for (i, payload) in small_payloads.iter().enumerate() {
-            let stored_payload = storage.get_payload(i as u32);
-            assert_eq!(stored_payload.as_ref(), Some(payload));
-        }
-
-        // check fragmentation
-        assert!(!storage.pages_to_defrag().is_empty());
-
-        // compaction
-        storage.compact_all();
-
-        // check consistency
-        for (i, payload) in small_payloads.iter().enumerate() {
-            let stored_payload = storage.get_payload(i as u32);
-            assert_eq!(stored_payload.as_ref(), Some(payload));
-        }
-
-        // check no outstanding fragmentation
-        assert!(storage.pages_to_defrag().is_empty());
     }
 
     #[test]

@@ -28,16 +28,14 @@ impl PayloadStorage {
             .map(|(_, &free_space)| free_space)
             .sum();
 
-        let mut fragmented_bytes = 0;
         let mut total_size_bytes = 0;
         for page in self.pages.values() {
-            fragmented_bytes += page.fragmented_space();
             total_size_bytes += page.size();
         }
         StorageStats {
             pages_count,
             default_page_bytes,
-            fragmented_bytes,
+            fragmented_bytes: todo!(),
             total_size_bytes,
             available_bytes,
         }
