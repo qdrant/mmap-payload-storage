@@ -13,7 +13,7 @@ pub const BLOCK_SIZE_BYTES: usize = 128;
 
 #[derive(Debug)]
 pub struct PayloadStorage {
-    page_tracker: Tracker,
+    tracker: Tracker,
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
     pub(super) pages: HashMap<u32, Page>, // page_id -> mmap page
     bitmask: Bitmask,
@@ -38,7 +38,7 @@ impl PayloadStorage {
     pub fn files(&self) -> Vec<PathBuf> {
         let mut paths = Vec::with_capacity(self.pages.len() + 1);
         // page tracker file
-        for tracker_file in self.page_tracker.files() {
+        for tracker_file in self.tracker.files() {
             paths.push(tracker_file);
         }
         // slotted pages files
@@ -52,7 +52,7 @@ impl PayloadStorage {
     pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
         let page_size = page_size.unwrap_or(Self::PAGE_SIZE_BYTES);
         let mut storage = Self {
-            page_tracker: Tracker::new(&path, None),
+            tracker: Tracker::new(&path, None),
             new_page_size: page_size,
             pages: HashMap::new(),
             bitmask: Bitmask::new(path.clone(), page_size),
@@ -78,7 +78,7 @@ impl PayloadStorage {
 
         // load pages
         let mut storage = Self {
-            page_tracker,
+            tracker: page_tracker,
             new_page_size: new_page_size,
             pages: Default::default(),
             bitmask,
@@ -154,7 +154,7 @@ impl PayloadStorage {
 
     /// Get the mapping for a given point offset
     fn get_pointer(&self, point_offset: PointOffset) -> Option<ValuePointer> {
-        self.page_tracker.get(point_offset)
+        self.tracker.get(point_offset)
     }
 
     /// The number of blocks needed for a given value bytes size
@@ -171,6 +171,32 @@ impl PayloadStorage {
         }
     }
 
+    /// Write value into a new cell, considering that it can span more than one page
+    fn write_into_pages(
+        &mut self,
+        value: &[u8],
+        start_page_id: PageId,
+        mut block_offset: BlockOffset,
+    ) {
+        let payload_size = value.len();
+
+        // Leftover bytes is the number of bytes that still need to be written
+        let mut leftover_bytes = payload_size;
+
+        for page_id in start_page_id.. {
+            let page = self.pages.get_mut(&page_id).expect("Page not found");
+
+            let range = (payload_size - leftover_bytes)..;
+            leftover_bytes = page.write_value(block_offset, &value[range]);
+
+            if leftover_bytes == 0 {
+                break;
+            }
+
+            block_offset = 0;
+        }
+    }
+
     /// Put a payload in the storage.
     ///
     /// Returns true if the payload existed previously and was updated, false if it was newly inserted.
@@ -182,28 +208,31 @@ impl PayloadStorage {
         let required_blocks = Self::blocks_for_value(payload_size);
         let (start_page_id, block_offset) = self.find_or_create_available_blocks(required_blocks);
 
-        if let Some(old_pointer) = self.get_pointer(point_offset) {
-            // this is an update
+        let old_pointer_opt = self.get_pointer(point_offset);
 
-            // insert into a new cell, considering that it can span more than one page
-            let mut unwritten_bytes = payload_size;
-            for page_id in start_page_id.. {
-                let page = self.pages.get_mut(&page_id).expect("Page not found");
+        // In case of crashing somewhere in the middle of this operation, the worst
+        // that should happen is that we mark more cells as used than they actually are,
+        // so will never reuse such space, but data will not be corrupted.
 
-                let range = (payload_size - unwritten_bytes)..;
-                unwritten_bytes = page.write_value(block_offset, &comp_payload[range]);
+        // insert into a new cell, considering that it can span more than one page
+        self.write_into_pages(&comp_payload, start_page_id, block_offset);
 
-                if unwritten_bytes == 0 {
-                    break;
-                }
-            }
-            // TODO:
-            // - update the pointer
+        // mark new cell as used in the bitmask
+        self.bitmask
+            .mark_blocks(start_page_id, block_offset, required_blocks, true);
 
-            // mark new cell as used in the bitmask
-            self.bitmask
-                .mark_blocks(start_page_id, block_offset, required_blocks, true);
+        // update the pointer
+        self.tracker.set(
+            point_offset,
+            ValuePointer {
+                page_id: start_page_id,
+                block_offset,
+                length: payload_size as u32,
+            },
+        );
 
+        // Check if payload update.
+        if let Some(old_pointer) = old_pointer_opt {
             // mark old cell as available in the bitmask
             self.bitmask.mark_blocks(
                 old_pointer.page_id,
@@ -211,23 +240,13 @@ impl PayloadStorage {
                 Self::blocks_for_value(old_pointer.length as usize),
                 false,
             );
-
-            // TODO:
-            // - recompute bitmask gaps
-
-            true
-        } else {
-            // this is a new payload
-
-            // TODO:
-            // - find page and offset which fits the payload
-            // - insert the payload
-            // - update the index
-            // - mark the cell blocks as used in the bitmask
-            // - recompute bitmask gaps
-
-            false
         }
+
+        // TODO:
+        // - recompute bitmask gaps
+
+        // return whether it was an update or not
+        old_pointer_opt.is_some()
     }
 
     /// Delete a payload from the storage
@@ -250,9 +269,17 @@ impl PayloadStorage {
         let payload = Payload::from_bytes(&decompressed);
 
         // delete mapping
-        self.page_tracker.unset(point_offset);
+        self.tracker.unset(point_offset);
 
-        // TODO: mark the cell blocks as available in the bitmask AND recompute bitmask gaps
+        // mark cell as available in the bitmask
+        self.bitmask.mark_blocks(
+            page_id,
+            block_offset,
+            Self::blocks_for_value(length as usize),
+            false,
+        );
+
+        // TODO: recompute bitmask gaps
         Some(payload)
     }
 
@@ -266,7 +293,7 @@ impl PayloadStorage {
 
     /// Flush all mmap pages to disk
     pub fn flush(&self) -> std::io::Result<()> {
-        self.page_tracker.flush()?;
+        self.tracker.flush()?;
         for page in self.pages.values() {
             page.flush()?;
         }
@@ -279,7 +306,7 @@ impl PayloadStorage {
     where
         F: FnMut(PointOffset, &Payload) -> std::io::Result<bool>,
     {
-        for pointer in self.page_tracker.iter_pointers().filter_map(|x| x) {
+        for pointer in self.tracker.iter_pointers().filter_map(|x| x) {
             let ValuePointer {
                 page_id,
                 block_offset,
@@ -324,7 +351,7 @@ mod tests {
         let payload = Payload::default();
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -342,7 +369,7 @@ mod tests {
 
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
@@ -364,7 +391,7 @@ mod tests {
 
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
         let files = storage.files();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].file_name().unwrap(), "page_tracker.dat");
@@ -438,7 +465,7 @@ mod tests {
 
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 1); // first page
@@ -456,7 +483,7 @@ mod tests {
 
         storage.put_payload(0, &updated_payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -527,7 +554,7 @@ mod tests {
         }
 
         // asset same length
-        assert_eq!(storage.page_tracker.mapping_len(), model_hashmap.len());
+        assert_eq!(storage.tracker.mapping_len(), model_hashmap.len());
 
         // validate storage and model_hashmap are the same
         for point_offset in 0..=max_point_offset {
@@ -543,7 +570,7 @@ mod tests {
         let storage = PayloadStorage::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
 
         // asset same length
-        assert_eq!(storage.page_tracker.mapping_len(), model_hashmap.len());
+        assert_eq!(storage.tracker.mapping_len(), model_hashmap.len());
 
         // validate storage and model_hashmap are the same
         for point_offset in 0..=max_point_offset {
@@ -606,7 +633,7 @@ mod tests {
 
         // the page has been reclaimed completely
         assert!(!storage.pages.contains_key(&1));
-        assert!(storage.page_tracker.get(0).is_none());
+        assert!(storage.tracker.get(0).is_none());
     }
 
     #[test]
@@ -701,14 +728,14 @@ mod tests {
         // load data into storage
         let point_offset = write_data(&mut storage, 0);
         assert_eq!(point_offset, EXPECTED_LEN as u32);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN);
+        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN);
         assert_eq!(storage.pages.len(), 2);
 
         // write the same payload a second time
         let point_offset = write_data(&mut storage, point_offset);
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 4);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent
         storage_double_pass_is_consistent(&storage, 0);
@@ -720,7 +747,7 @@ mod tests {
         let mut storage = PayloadStorage::open(dir.path().to_path_buf(), None).unwrap();
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 4);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent after reopening
         storage_double_pass_is_consistent(&storage, 0);

@@ -179,9 +179,9 @@ impl Tracker {
 
     /// Set value at the given point offset
     /// If the point offset is larger than the current length, the mapping is resized
-    pub fn set(&mut self, point_offset: PointOffset, page_pointer: ValuePointer) {
+    pub fn set(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
         // save mapping to mmap
-        self.persist_pointer(point_offset, Some(page_pointer));
+        self.persist_pointer(point_offset, Some(value_pointer));
         // increment header count if necessary
         self.increment_max_point_offset(point_offset);
     }

@@ -70,6 +70,9 @@ impl Bitmask {
     pub fn cover_new_page(&mut self, page_size: usize) {
         let extra_length = Self::length_for_page(page_size);
 
+        // flush outstanding changes
+        self.mmap.flusher()().unwrap();
+
         // reopen the file with a larger size
         let new_length = self.mmap.len() + extra_length;
         create_and_ensure_length(&self.path, new_length).unwrap();
