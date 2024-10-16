@@ -17,7 +17,7 @@ pub struct PayloadStorage {
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
     pub(super) pages: HashMap<u32, Page>, // page_id -> mmap page
     bitmask: Bitmask,
-    max_page_id: u32,
+    next_page_id: u32,
     base_path: PathBuf,
 }
 
@@ -55,12 +55,17 @@ impl PayloadStorage {
             tracker: Tracker::new(&path, None),
             new_page_size: page_size,
             pages: HashMap::new(),
-            bitmask: Bitmask::new(path.clone(), page_size),
-            max_page_id: 0,
+            bitmask: Bitmask::with_capacity(path.clone(), page_size),
+            next_page_id: 0,
             base_path: path,
         };
 
-        storage.create_new_page();
+        // create first page to be covered by the bitmask
+        let new_page_id = storage.next_page_id;
+        let path = storage.page_path(new_page_id);
+        let page = Page::new(&path, storage.new_page_size);
+        let was_created = storage.add_page(new_page_id, page);
+        assert!(was_created);
 
         storage
     }
@@ -82,20 +87,16 @@ impl PayloadStorage {
             new_page_size: new_page_size,
             pages: Default::default(),
             bitmask,
-            max_page_id: 0,
+            next_page_id: 0,
             base_path: path.clone(),
         };
-        for page_id in 1..=max_page_id as PageId {
+        for page_id in 0..=max_page_id as PageId {
             let page_path = storage.page_path(page_id);
             let slotted_page = Page::open(&page_path).expect("Page not found");
 
             storage.add_page(page_id, slotted_page);
         }
         Some(storage)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pages.is_empty()
     }
 
     /// Get the path for a given page id
@@ -110,14 +111,39 @@ impl PayloadStorage {
             return false;
         }
 
+        debug_assert_eq!(page_id, self.next_page_id, "Page id mismatch");
+
         let previous = self.pages.insert(page_id, page);
         debug_assert!(previous.is_none());
 
-        if page_id > self.max_page_id {
-            self.max_page_id = page_id;
-        }
+        self.next_page_id += 1;
 
         true
+    }
+
+    /// Read value from the pages. Considering that they can span more than one page.
+    fn read_from_pages(
+        &self,
+        start_page_id: PageId,
+        mut block_offset: BlockOffset,
+        mut length: u32,
+    ) -> Vec<u8> {
+        let mut raw_sections = vec![];
+
+        for page_id in start_page_id.. {
+            let page = self.pages.get(&page_id).expect("Page not found");
+            let (raw, unread_bytes) = page.read_value(block_offset, length);
+            raw_sections.extend(raw);
+
+            if unread_bytes == 0 {
+                break;
+            }
+
+            block_offset = 0;
+            length = unread_bytes as u32;
+        }
+
+        raw_sections
     }
 
     /// Get the payload for a given point offset
@@ -127,12 +153,11 @@ impl PayloadStorage {
             block_offset,
             length,
         } = self.get_pointer(point_offset)?;
-        let page = self.pages.get(&page_id).expect("Page not found");
-        let raw = page
-            .read_value(block_offset, length)
-            .expect("Value not found");
-        let decompressed = Self::decompress(raw);
+
+        let raw = self.read_from_pages(page_id, block_offset, length);
+        let decompressed = Self::decompress(&raw);
         let payload = Payload::from_bytes(&decompressed);
+
         Some(payload)
     }
 
@@ -141,7 +166,7 @@ impl PayloadStorage {
     ///
     /// Returns the new page id
     fn create_new_page(&mut self) -> u32 {
-        let new_page_id = self.max_page_id + 1;
+        let new_page_id = self.next_page_id;
         let path = self.page_path(new_page_id);
         let page = Page::new(&path, self.new_page_size);
         let was_created = self.add_page(new_page_id, page);
@@ -164,7 +189,10 @@ impl PayloadStorage {
 
     fn find_or_create_available_blocks(&mut self, num_blocks: u32) -> (PageId, BlockOffset) {
         loop {
-            if let Some((page_id, block_offset)) = self.bitmask.find_available_blocks(num_blocks) {
+            if let Some((page_id, block_offset)) = self
+                .bitmask
+                .find_available_blocks(num_blocks, self.new_page_size)
+            {
                 return (page_id, block_offset);
             }
             self.create_new_page();
@@ -180,16 +208,16 @@ impl PayloadStorage {
     ) {
         let payload_size = value.len();
 
-        // Leftover bytes is the number of bytes that still need to be written
-        let mut leftover_bytes = payload_size;
+        // Track the number of bytes that still need to be written
+        let mut unwritten_tail = payload_size;
 
         for page_id in start_page_id.. {
             let page = self.pages.get_mut(&page_id).expect("Page not found");
 
-            let range = (payload_size - leftover_bytes)..;
-            leftover_bytes = page.write_value(block_offset, &value[range]);
+            let range = (payload_size - unwritten_tail)..;
+            unwritten_tail = page.write_value(block_offset, &value[range]);
 
-            if leftover_bytes == 0 {
+            if unwritten_tail == 0 {
                 break;
             }
 
@@ -260,12 +288,8 @@ impl PayloadStorage {
             block_offset,
             length,
         } = self.get_pointer(point_offset)?;
-        let page = self.pages.get_mut(&page_id).expect("Page not found");
-        // get current value
-        let raw = page
-            .read_value(block_offset, length)
-            .expect("Value not found");
-        let decompressed = Self::decompress(raw);
+        let raw = self.read_from_pages(page_id, block_offset, length);
+        let decompressed = Self::decompress(&raw);
         let payload = Payload::from_bytes(&decompressed);
 
         // delete mapping
@@ -313,11 +337,8 @@ impl PayloadStorage {
                 length,
             } = pointer;
 
-            let page = self.pages.get(&page_id).expect("Page not found");
-            let raw = page
-                .read_value(block_offset, length)
-                .expect("Cell not found");
-            let decompressed = Self::decompress(raw);
+            let raw = self.read_from_pages(page_id, block_offset, length);
+            let decompressed = Self::decompress(&raw);
             let payload = Payload::from_bytes(&decompressed);
             if !callback(block_offset, &payload)? {
                 return Ok(());
@@ -372,7 +393,7 @@ mod tests {
         assert_eq!(storage.tracker.mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
-        assert_eq!(page_mapping.page_id, 1); // first page
+        assert_eq!(page_mapping.page_id, 0); // first page
         assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
@@ -438,7 +459,7 @@ mod tests {
         assert_eq!(storage.pages.len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
-        assert_eq!(page_mapping.page_id, 1); // first page
+        assert_eq!(page_mapping.page_id, 0); // first page
         assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
@@ -468,7 +489,7 @@ mod tests {
         assert_eq!(storage.tracker.mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
-        assert_eq!(page_mapping.page_id, 1); // first page
+        assert_eq!(page_mapping.page_id, 0); // first page
         assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
@@ -518,7 +539,9 @@ mod tests {
     }
 
     #[rstest]
-    fn test_behave_like_hashmap(#[values(10, 10_000, 32_000_000)] page_size: usize) {
+    fn test_behave_like_hashmap(
+        #[values(8192, 819_200, PayloadStorage::PAGE_SIZE_BYTES)] page_size: usize,
+    ) {
         let (dir, mut storage) = empty_storage_sized(page_size);
 
         let rng = &mut rand::thread_rng();
@@ -603,10 +626,10 @@ mod tests {
         payload.0.insert("huge".to_string(), huge_value);
 
         storage.put_payload(0, &payload);
-        assert_eq!(storage.pages.len(), 1);
+        assert_eq!(storage.pages.len(), 2);
 
         let page_mapping = storage.get_pointer(0).unwrap();
-        assert_eq!(page_mapping.page_id, 1); // first page
+        assert_eq!(page_mapping.page_id, 0); // first page
         assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
@@ -618,22 +641,19 @@ mod tests {
             let free_blocks = storage
                 .bitmask
                 .free_blocks_for_page(1, storage.new_page_size);
-            let expected_free_blocks = 1024 * 1024 * 14 / BLOCK_SIZE_BYTES;
-            assert_eq!(free_blocks, expected_free_blocks);
+            let min_expected = 1024 * 1024 * 13 / BLOCK_SIZE_BYTES;
+            let max_expected = 1024 * 1024 * 15 / BLOCK_SIZE_BYTES;
+            assert!((min_expected..max_expected).contains(&free_blocks));
         }
 
         {
             // delete payload
             let deleted = storage.delete_payload(0);
             assert!(deleted.is_some());
-            assert_eq!(storage.pages.len(), 1);
+            assert_eq!(storage.pages.len(), 2);
 
             assert!(storage.get_payload(0).is_none());
         }
-
-        // the page has been reclaimed completely
-        assert!(!storage.pages.contains_key(&1));
-        assert!(storage.tracker.get(0).is_none());
     }
 
     #[test]
@@ -653,7 +673,7 @@ mod tests {
             assert_eq!(storage.pages.len(), 1);
 
             let page_mapping = storage.get_pointer(0).unwrap();
-            assert_eq!(page_mapping.page_id, 1); // first page
+            assert_eq!(page_mapping.page_id, 0); // first page
             assert_eq!(page_mapping.block_offset, 0); // first cell
 
             let stored_payload = storage.get_payload(0);

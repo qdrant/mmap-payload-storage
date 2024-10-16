@@ -3,6 +3,7 @@ use crate::tracker::BlockOffset;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use memmap2::MmapMut;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -63,12 +64,13 @@ impl Page {
 
         let value_end = value_start + value_size;
         // only write what fits in the page
-        let unwritten_bytes = value_end.saturating_sub(self.mmap.len());
+        let unwritten_tail = value_end.saturating_sub(self.mmap.len());
 
         // set value region
-        self.mmap[value_start..value_end - unwritten_bytes].copy_from_slice(value);
+        self.mmap[value_start..value_end - unwritten_tail]
+            .copy_from_slice(&value[..value_size - unwritten_tail]);
 
-        unwritten_bytes
+        unwritten_tail
     }
 
     /// Read a value from the page
@@ -80,16 +82,23 @@ impl Page {
     /// # Returns
     /// - None if the value is not within the page
     /// - Some(slice) if the value was successfully read
-    pub fn read_value(&self, block_offset: BlockOffset, length: u32) -> Option<&[u8]> {
+    ///
+    /// # Panics
+    ///
+    /// When the `block_offset` starts after the page ends
+    ///
+    pub fn read_value(&self, block_offset: BlockOffset, length: u32) -> (&[u8], usize) {
         let value_start = block_offset as usize * BLOCK_SIZE_BYTES;
-        // check that the value is within the page
-        if value_start + length as usize > self.mmap.len() {
-            return None;
-        }
+
+        let value_end = value_start + length as usize;
+
+        let unread_bytes = value_end.saturating_sub(self.mmap.len());
 
         // read value region
-        let value_end = value_start + length as usize;
-        Some(&self.mmap[value_start..value_end])
+        (
+            &self.mmap[value_start..value_end - unread_bytes],
+            unread_bytes,
+        )
     }
 
     /// Delete the page from the filesystem.
