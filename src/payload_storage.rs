@@ -79,7 +79,7 @@ impl PayloadStorage {
 
         let bitmask = Bitmask::open(path.clone(), new_page_size);
 
-        let max_page_id = bitmask.infer_max_page_id();
+        let num_pages = bitmask.infer_num_pages();
 
         // load pages
         let mut storage = Self {
@@ -90,7 +90,7 @@ impl PayloadStorage {
             next_page_id: 0,
             base_path: path.clone(),
         };
-        for page_id in 0..=max_page_id as PageId {
+        for page_id in 0..num_pages as PageId {
             let page_path = storage.page_path(page_id);
             let slotted_page = Page::open(&page_path).expect("Page not found");
 
@@ -412,7 +412,7 @@ mod tests {
         let files = storage.files();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].file_name().unwrap(), "page_tracker.dat");
-        assert_eq!(files[1].file_name().unwrap(), "slotted_paged_1.dat");
+        assert_eq!(files[1].file_name().unwrap(), "page_0.dat");
     }
 
     #[test]
@@ -574,12 +574,10 @@ mod tests {
         for operation in operations.into_iter() {
             match operation {
                 Operation::Put(point_offset, payload) => {
-                    println!("PUT {}", point_offset);
                     storage.put_payload(point_offset, &payload);
                     model_hashmap.insert(point_offset, payload);
                 }
                 Operation::Delete(point_offset) => {
-                    println!("DELETE {}", point_offset);
                     let old1 = storage.delete_payload(point_offset);
                     let old2 = model_hashmap.remove(&point_offset);
                     assert_eq!(
@@ -589,7 +587,6 @@ mod tests {
                     );
                 }
                 Operation::Update(point_offset, payload) => {
-                    println!("UPDATE {}", point_offset);
                     storage.put_payload(point_offset, &payload);
                     model_hashmap.insert(point_offset, payload);
                 }

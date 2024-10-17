@@ -76,11 +76,10 @@ impl Bitmask {
         dir.join(BITMASK_NAME)
     }
 
-    pub fn infer_max_page_id(&self) -> usize {
-        let length = self.bitslice.len();
-        let bits = length * 8;
+    pub fn infer_num_pages(&self) -> usize {
+        let bits = self.bitslice.len();
         let covered_bytes = bits * BLOCK_SIZE_BYTES;
-        covered_bytes / self.page_size
+        covered_bytes.div_euclid(self.page_size)
     }
 
     /// Extend the bitslice to cover another page
