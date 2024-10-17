@@ -284,7 +284,7 @@ mod tests {
 
         // overwrite some values
         tracker.set(0, ValuePointer::new(10, 10, 10));
-        tracker.set(2, ValuePointer::new(30, 30, 10));
+        tracker.set(2, ValuePointer::new(30, 30, 30));
 
         assert_eq!(tracker.get(0), Some(ValuePointer::new(10, 10, 10)));
         assert_eq!(tracker.get(2), Some(ValuePointer::new(30, 30, 30)));

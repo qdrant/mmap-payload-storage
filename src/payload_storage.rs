@@ -77,9 +77,9 @@ impl PayloadStorage {
 
         let page_tracker = Tracker::open(&path)?;
 
-        let bitmask = Bitmask::open(path.clone());
+        let bitmask = Bitmask::open(path.clone(), new_page_size);
 
-        let max_page_id = bitmask.infer_max_page_id(new_page_size);
+        let max_page_id = bitmask.infer_max_page_id();
 
         // load pages
         let mut storage = Self {
@@ -172,7 +172,7 @@ impl PayloadStorage {
         let was_created = self.add_page(new_page_id, page);
         assert!(was_created);
 
-        self.bitmask.cover_new_page(self.new_page_size);
+        self.bitmask.cover_new_page();
 
         new_page_id
     }
@@ -189,10 +189,7 @@ impl PayloadStorage {
 
     fn find_or_create_available_blocks(&mut self, num_blocks: u32) -> (PageId, BlockOffset) {
         loop {
-            if let Some((page_id, block_offset)) = self
-                .bitmask
-                .find_available_blocks(num_blocks, self.new_page_size)
-            {
+            if let Some((page_id, block_offset)) = self.bitmask.find_available_blocks(num_blocks) {
                 return (page_id, block_offset);
             }
             self.create_new_page();
@@ -236,8 +233,6 @@ impl PayloadStorage {
         let required_blocks = Self::blocks_for_value(payload_size);
         let (start_page_id, block_offset) = self.find_or_create_available_blocks(required_blocks);
 
-        let old_pointer_opt = self.get_pointer(point_offset);
-
         // In case of crashing somewhere in the middle of this operation, the worst
         // that should happen is that we mark more cells as used than they actually are,
         // so will never reuse such space, but data will not be corrupted.
@@ -250,6 +245,7 @@ impl PayloadStorage {
             .mark_blocks(start_page_id, block_offset, required_blocks, true);
 
         // update the pointer
+        let old_pointer_opt = self.get_pointer(point_offset);
         self.tracker.set(
             point_offset,
             ValuePointer {
@@ -259,7 +255,7 @@ impl PayloadStorage {
             },
         );
 
-        // Check if payload update.
+        // Check if it is a payload update.
         if let Some(old_pointer) = old_pointer_opt {
             // mark old cell as available in the bitmask
             self.bitmask.mark_blocks(
@@ -434,7 +430,7 @@ mod tests {
 
             let stored_payload = storage.get_payload(*point_offset);
             assert!(stored_payload.is_some());
-            assert_eq!(stored_payload.unwrap(), payload.clone());
+            assert_eq!(&stored_payload.unwrap(), payload);
         }
 
         // read randomly
@@ -511,6 +507,27 @@ mod tests {
         assert_eq!(stored_payload.unwrap(), updated_payload);
     }
 
+    #[test]
+    fn test_write_across_pages() {
+        let (_dir, mut storage) = empty_storage_sized(8192);
+
+        storage.create_new_page();
+
+        let value_len = 1000;
+
+        // Value should span 8 blocks
+        let value = (0..)
+            .map(|i| (i % 24) as u8)
+            .take(value_len)
+            .collect::<Vec<_>>();
+
+        // Let's write it near the end (the page has 64 blocks, so 7 blocks should be written on the first page and 1 on the second page)
+        storage.write_into_pages(&value, 0, 57);
+
+        let read_value = storage.read_from_pages(0, 57, value_len as u32);
+        assert_eq!(value, read_value);
+    }
+
     enum Operation {
         Put(PointOffset, Payload),
         Delete(PointOffset),
@@ -557,10 +574,12 @@ mod tests {
         for operation in operations.into_iter() {
             match operation {
                 Operation::Put(point_offset, payload) => {
+                    println!("PUT {}", point_offset);
                     storage.put_payload(point_offset, &payload);
                     model_hashmap.insert(point_offset, payload);
                 }
                 Operation::Delete(point_offset) => {
+                    println!("DELETE {}", point_offset);
                     let old1 = storage.delete_payload(point_offset);
                     let old2 = model_hashmap.remove(&point_offset);
                     assert_eq!(
@@ -570,6 +589,7 @@ mod tests {
                     );
                 }
                 Operation::Update(point_offset, payload) => {
+                    println!("UPDATE {}", point_offset);
                     storage.put_payload(point_offset, &payload);
                     model_hashmap.insert(point_offset, payload);
                 }
@@ -638,9 +658,7 @@ mod tests {
 
         {
             // the fitting page should be 64MB, so we should still have about 14MB of free space
-            let free_blocks = storage
-                .bitmask
-                .free_blocks_for_page(1, storage.new_page_size);
+            let free_blocks = storage.bitmask.free_blocks_for_page(1);
             let min_expected = 1024 * 1024 * 13 / BLOCK_SIZE_BYTES;
             let max_expected = 1024 * 1024 * 15 / BLOCK_SIZE_BYTES;
             assert!((min_expected..max_expected).contains(&free_blocks));
@@ -754,8 +772,8 @@ mod tests {
         // write the same payload a second time
         let point_offset = write_data(&mut storage, point_offset);
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
-        assert_eq!(storage.pages.len(), 4);
         assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.pages.len(), 4);
 
         // assert storage is consistent
         storage_double_pass_is_consistent(&storage, 0);

@@ -3,7 +3,6 @@ use crate::tracker::BlockOffset;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use memmap2::MmapMut;
-use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -90,14 +89,16 @@ impl Page {
     pub fn read_value(&self, block_offset: BlockOffset, length: u32) -> (&[u8], usize) {
         let value_start = block_offset as usize * BLOCK_SIZE_BYTES;
 
+        assert!(value_start < self.mmap.len());
+
         let value_end = value_start + length as usize;
 
-        let unread_bytes = value_end.saturating_sub(self.mmap.len());
+        let unread_tail = value_end.saturating_sub(self.mmap.len());
 
         // read value region
         (
-            &self.mmap[value_start..value_end - unread_bytes],
-            unread_bytes,
+            &self.mmap[value_start..value_end - unread_tail],
+            unread_tail,
         )
     }
 
