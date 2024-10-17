@@ -14,6 +14,8 @@ ciborium = "0.2.2"
 lz4_flex = { version = "0.11.3", default-features = false }
 rand = "0.8.5"
 priority-queue = "2.1.1"
+bitvec = "1.0.1"
+thiserror = "1.0.64"
 
 [dev-dependencies]
 criterion = "0.5.1"
