@@ -188,12 +188,19 @@ impl PayloadStorage {
     }
 
     fn find_or_create_available_blocks(&mut self, num_blocks: u32) -> (PageId, BlockOffset) {
-        loop {
-            if let Some((page_id, block_offset)) = self.bitmask.find_available_blocks(num_blocks) {
-                return (page_id, block_offset);
-            }
+        debug_assert!(num_blocks > 0, "num_blocks must be greater than 0");
+
+        if let Some((page_id, block_offset)) = self.bitmask.find_available_blocks(num_blocks) {
+            return (page_id, block_offset);
+        }
+        // else we need new page(s)
+        let num_pages = (num_blocks as usize * BLOCK_SIZE_BYTES).div_ceil(self.new_page_size);
+        for _ in 0..num_pages {
             self.create_new_page();
         }
+
+        // At this point we are sure that we have enough free pages to allocate the blocks
+        self.bitmask.find_available_blocks(num_blocks).unwrap()
     }
 
     /// Write value into a new cell, considering that it can span more than one page
@@ -209,7 +216,10 @@ impl PayloadStorage {
         let mut unwritten_tail = payload_size;
 
         for page_id in start_page_id.. {
-            let page = self.pages.get_mut(&page_id).expect("Page not found");
+            let page = self
+                .pages
+                .get_mut(&page_id)
+                .expect(&format!("Page {page_id} not found"));
 
             let range = (payload_size - unwritten_tail)..;
             unwritten_tail = page.write_value(block_offset, &value[range]);
@@ -349,7 +359,10 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    use crate::fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS};
+    use crate::{
+        bitmask::REGION_SIZE_BLOCKS,
+        fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS},
+    };
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
     use rstest::rstest;
     use tempfile::Builder;
@@ -509,7 +522,8 @@ mod tests {
 
     #[test]
     fn test_write_across_pages() {
-        let (_dir, mut storage) = empty_storage_sized(8192);
+        let page_size = BLOCK_SIZE_BYTES * REGION_SIZE_BLOCKS;
+        let (_dir, mut storage) = empty_storage_sized(page_size);
 
         storage.create_new_page();
 
@@ -521,10 +535,11 @@ mod tests {
             .take(value_len)
             .collect::<Vec<_>>();
 
-        // Let's write it near the end (the page has 64 blocks, so 7 blocks should be written on the first page and 1 on the second page)
-        storage.write_into_pages(&value, 0, 57);
+        // Let's write it near the end
+        let block_offset = REGION_SIZE_BLOCKS - 10;
+        storage.write_into_pages(&value, 0, block_offset as u32);
 
-        let read_value = storage.read_from_pages(0, 57, value_len as u32);
+        let read_value = storage.read_from_pages(0, block_offset as u32, value_len as u32);
         assert_eq!(value, read_value);
     }
 
@@ -557,7 +572,7 @@ mod tests {
 
     #[rstest]
     fn test_behave_like_hashmap(
-        #[values(8192, 819_200, PayloadStorage::PAGE_SIZE_BYTES)] page_size: usize,
+        #[values(1_048_576, 2_097_152, PayloadStorage::PAGE_SIZE_BYTES)] page_size: usize,
     ) {
         let (dir, mut storage) = empty_storage_sized(page_size);
 
