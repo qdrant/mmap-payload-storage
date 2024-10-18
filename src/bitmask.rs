@@ -1,7 +1,7 @@
-use std::cmp::Ordering;
 use std::ops::Range;
 use std::path::PathBuf;
 
+use bitvec::field::BitField;
 use bitvec::slice::BitSlice;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
@@ -332,21 +332,40 @@ impl Bitmask {
 
     fn calculate_gaps(region: &BitSlice) -> Gaps {
         debug_assert!(
-            region.len() <= REGION_SIZE_BLOCKS as usize,
+            region.len() != REGION_SIZE_BLOCKS as usize,
             "Unexpected region size"
         );
+        // copy slice into bitvec
+        let mut bitvec = region.to_bitvec();
+
         let mut max = 0;
         let mut current = 0;
-        // TODO: capture leading on the same loop?
-        for b in region {
-            if !b {
-                current += 1;
-                if current > max {
-                    max = current;
-                }
+        
+        // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
+        const BITS_IN_CHUNK: u16 = (size_of::<usize>() * 8) as u16;
+        for &mut mut chunk in bitvec.as_raw_mut_slice().into_iter() {
+            if chunk == 0 {
+                current += BITS_IN_CHUNK;
             } else {
-                current = 0;
+                while chunk != 0 {
+                    if (chunk & 1) == 0 {
+                        current += 1;
+                        chunk >>= 1;
+                    } else {
+                        if current > max {
+                            max = current;
+                        }
+                        current = 0;
+                        while chunk & 1 == 1 {
+                            // Skip over consecutive ones
+                            chunk >>= 1;
+                        }
+                    }
+                }
             }
+        }
+        if current > max {
+            max = current;
         }
 
         assert!(max <= REGION_SIZE_BLOCKS as u16, "Unexpected max gap size");
@@ -357,8 +376,8 @@ impl Bitmask {
             leading = max;
             trailing = max;
         } else {
-            leading = region.iter().take_while(|b| *b == false).count() as u16;
-            trailing = region.iter().rev().take_while(|b| *b == false).count() as u16;
+            leading = region.leading_zeros() as u16;
+            trailing = region.trailing_zeros() as u16;
         }
 
         Gaps {
