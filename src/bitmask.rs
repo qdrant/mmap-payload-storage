@@ -273,25 +273,55 @@ impl Bitmask {
         let regions_start_offset = region_id_range.start as usize * REGION_SIZE_BLOCKS;
         let regions_end_offset = region_id_range.end as usize * REGION_SIZE_BLOCKS;
 
+        let translate_to_answer = |current_start: u32| {
+            let page_size_in_blocks = self.page_size / BLOCK_SIZE_BYTES;
+
+            let global_cursor_offset = current_start as usize + regions_start_offset;
+
+            // Calculate the page id and the block offset within the page
+            let page_id = global_cursor_offset.div_euclid(page_size_in_blocks);
+            let page_block_offset = global_cursor_offset.rem_euclid(page_size_in_blocks);
+
+            (page_id as PageId, page_block_offset as BlockOffset)
+        };
+
         let regions_bitslice = &self.bitslice[regions_start_offset..regions_end_offset];
 
-        let mut cursor = 0;
-        while (cursor + num_blocks as usize) <= regions_bitslice.len() {
-            let bitslice = &regions_bitslice[cursor..cursor + num_blocks as usize];
-            if let Some(offset) = bitslice.last_one() {
-                // skip the whole part which has ones in the middle
-                cursor += offset + 1;
+        let mut bitvec = regions_bitslice.to_bitvec();
+        let mut current_size: u32 = 0;
+        let mut current_start: u32 = 0;
+        let mut bit_idx = 0;
+        // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
+        const BITS_IN_CHUNK: u32 = (size_of::<usize>() * 8) as u32;
+        for (chunk_idx, &mut mut chunk) in bitvec.as_raw_mut_slice().into_iter().enumerate() {
+            if chunk == 0 {
+                current_size += BITS_IN_CHUNK;
+                // TODO: optimize the case of all ones too.
             } else {
+                while bit_idx < BITS_IN_CHUNK {
+                    if (chunk & 1) == 0 {
+                        current_size += 1;
+                        if current_size >= num_blocks {
+                            // bingo - we found a free cell of num_blocks
+                            return Some(translate_to_answer(current_start));
+                        }
+                        chunk >>= 1;
+                        bit_idx += 1;
+                    } else {
+                        while chunk & 1 == 1 {
+                            // Skip over consecutive ones
+                            chunk >>= 1;
+                            bit_idx += 1;
+                        }
+                        current_size = 0;
+                        current_start = chunk_idx as u32 * BITS_IN_CHUNK + bit_idx;
+                    }
+                }
+                bit_idx = 0;
+            }
+            if current_size >= num_blocks {
                 // bingo - we found a free cell of num_blocks
-                let page_size_in_blocks = self.page_size / BLOCK_SIZE_BYTES;
-
-                let global_cursor_offset = cursor + regions_start_offset;
-
-                // Calculate the page id and the block offset within the page
-                let page_id = global_cursor_offset.div_euclid(page_size_in_blocks);
-                let page_block_offset = global_cursor_offset.rem_euclid(page_size_in_blocks);
-
-                return Some((page_id as PageId, page_block_offset as BlockOffset));
+                return Some(translate_to_answer(current_start));
             }
         }
         None
@@ -340,7 +370,7 @@ impl Bitmask {
 
         let mut max = 0;
         let mut current = 0;
-        
+
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
         const BITS_IN_CHUNK: u16 = (size_of::<usize>() * 8) as u16;
         for &mut mut chunk in bitvec.as_raw_mut_slice().into_iter() {
@@ -426,6 +456,10 @@ mod tests {
         assert_eq!(page_id, 0);
 
         let (page_id, block_offset) = bitmask.find_available_blocks(2).unwrap();
+        assert_eq!(block_offset, 10);
+        assert_eq!(page_id, 0);
+
+        let (page_id, block_offset) = bitmask.find_available_blocks(5).unwrap();
         assert_eq!(block_offset, 10);
         assert_eq!(page_id, 0);
 
