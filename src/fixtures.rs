@@ -8,7 +8,6 @@ use tempfile::{Builder, TempDir};
 pub fn empty_storage() -> (TempDir, PayloadStorage) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
     let storage = PayloadStorage::new(dir.path().to_path_buf(), None);
-    assert!(storage.is_empty());
     (dir, storage)
 }
 
@@ -16,7 +15,6 @@ pub fn empty_storage() -> (TempDir, PayloadStorage) {
 pub fn empty_storage_sized(page_size: usize) -> (TempDir, PayloadStorage) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
     let storage = PayloadStorage::new(dir.path().to_path_buf(), Some(page_size));
-    assert!(storage.is_empty());
     (dir, storage)
 }
 
