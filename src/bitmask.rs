@@ -28,12 +28,22 @@ impl Gaps {
         #[cfg(debug_assertions)]
         {
             let maximum_possible = REGION_SIZE_BLOCKS as u16;
-            
+
             assert!(max <= maximum_possible, "Unexpected max gap size");
 
-            assert!(leading <= max, "Invalid gaps: leading is {}, but max is {}", leading, max);
+            assert!(
+                leading <= max,
+                "Invalid gaps: leading is {}, but max is {}",
+                leading,
+                max
+            );
 
-            assert!(trailing <= max, "Invalid gaps: trailing is {}, but max is {}", trailing, max);
+            assert!(
+                trailing <= max,
+                "Invalid gaps: trailing is {}, but max is {}",
+                trailing,
+                max
+            );
 
             if leading == maximum_possible || trailing == maximum_possible {
                 assert_eq!(leading, trailing);
