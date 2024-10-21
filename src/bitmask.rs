@@ -1,7 +1,6 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
-use bitvec::field::BitField;
 use bitvec::slice::BitSlice;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
@@ -23,12 +22,40 @@ struct Gaps {
 }
 
 impl Gaps {
+    fn new(leading: u16, trailing: u16, max: u16) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            assert!(max <= REGION_SIZE_BLOCKS as u16, "Unexpected max gap size");
+
+            assert!(leading <= max, "Invalid gaps {}/{}", leading, max);
+
+            assert!(trailing <= max, "Invalid gaps {}/{}", trailing, max);
+
+            if leading == REGION_SIZE_BLOCKS as u16 {
+                assert_eq!(leading, trailing);
+            }
+            if trailing == REGION_SIZE_BLOCKS as u16 {
+                assert_eq!(leading, trailing);
+            }
+        }
+
+        Self {
+            max,
+            leading,
+            trailing,
+        }
+    }
+
     fn all_free(blocks: u16) -> Self {
         Self {
             max: blocks,
             leading: blocks,
             trailing: blocks,
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.leading == REGION_SIZE_BLOCKS as u16
     }
 }
 
@@ -48,6 +75,25 @@ pub struct Bitmask {
 }
 
 impl Bitmask {
+    /// Calculate the leading and trailing gaps of a region.
+    pub fn trailing_free_blocks(&self) -> u32 {
+        let first_not_empty_from_the_end = self
+            .region_gaps
+            .iter()
+            .rev()
+            .position(|gap| !gap.is_empty());
+
+        match first_not_empty_from_the_end {
+            Some(index) => {
+                let num_empty_regions = self.region_gaps.len() - index - 1;
+                let sum_of_empty_regions = (num_empty_regions * REGION_SIZE_BLOCKS) as u32;
+                let last_trailing = self.region_gaps[index].trailing as u32;
+                sum_of_empty_regions + last_trailing
+            }
+            None => (self.region_gaps.len() * REGION_SIZE_BLOCKS) as u32,
+        }
+    }
+
     /// Calculate the amount of bytes needed for covering the blocks of a page.
     fn length_for_page(page_size: usize) -> usize {
         assert!(
@@ -292,7 +338,7 @@ impl Bitmask {
         let mut current_start: u32 = 0;
         let mut bit_idx = 0;
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
-        const BITS_IN_CHUNK: u32 = (size_of::<usize>() * 8) as u32;
+        const BITS_IN_CHUNK: u32 = usize::BITS;
         for (chunk_idx, &mut mut chunk) in bitvec.as_raw_mut_slice().into_iter().enumerate() {
             if chunk == 0 {
                 current_size += BITS_IN_CHUNK;
@@ -361,44 +407,74 @@ impl Bitmask {
     }
 
     fn calculate_gaps(region: &BitSlice) -> Gaps {
-        debug_assert!(
-            region.len() != REGION_SIZE_BLOCKS as usize,
+        debug_assert_eq!(
+            region.len(),
+            REGION_SIZE_BLOCKS as usize,
             "Unexpected region size"
         );
+        debug_assert!(!region.is_empty(), "region cannot be empty");
         // copy slice into bitvec
         let mut bitvec = region.to_bitvec();
 
         let mut max = 0;
         let mut current = 0;
 
+        // Example, instead of using u64, let's use u8 for simplicity
+        //
+        // 0b00000000 -> 0
+        // 0b00000001 -> 1
+        //
+        // EXAMPLE: 11100000 00110001
+        // current: 0
+        // max: 3
+        //
+        // 00110001 AND 00000001 = 1
+        // shift right
+        // 00011000 AND 00000001 = 0
+        // increment current
+        //
+        // shift right
+        // increment current
+        //
+        // shift right
+        // increment current
+        //
+        // shift right
+        // 00000011 AND 00000001 = 1
+        // update max
+        // set current to zero
+        //
+        // shift right
+        // 00000001 AND 00000001 = 1
+        // set current to zero
+        //
+        // shift right
+        // chunk == 00000000
+        //
+        // ... TBC
+
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
-        const BITS_IN_CHUNK: u16 = (size_of::<usize>() * 8) as u16;
+        const BITS_IN_CHUNK: u16 = usize::BITS as u16;
         for &mut mut chunk in bitvec.as_raw_mut_slice().into_iter() {
             if chunk == 0 {
                 current += BITS_IN_CHUNK;
             } else {
-                while chunk != 0 {
+                for _ in 0..BITS_IN_CHUNK {
                     if (chunk & 1) == 0 {
                         current += 1;
-                        chunk >>= 1;
                     } else {
                         if current > max {
                             max = current;
                         }
                         current = 0;
-                        while chunk & 1 == 1 {
-                            // Skip over consecutive ones
-                            chunk >>= 1;
-                        }
                     }
+                    chunk >>= 1;
                 }
             }
         }
         if current > max {
             max = current;
         }
-
-        assert!(max <= REGION_SIZE_BLOCKS as u16, "Unexpected max gap size");
 
         let leading;
         let trailing;
@@ -410,11 +486,7 @@ impl Bitmask {
             trailing = region.trailing_zeros() as u16;
         }
 
-        Gaps {
-            max,
-            leading,
-            trailing,
-        }
+        Gaps::new(leading, trailing, max)
     }
 }
 

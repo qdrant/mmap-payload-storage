@@ -84,7 +84,7 @@ impl PayloadStorage {
         // load pages
         let mut storage = Self {
             tracker: page_tracker,
-            new_page_size: new_page_size,
+            new_page_size,
             pages: Default::default(),
             bitmask,
             next_page_id: 0,
@@ -194,7 +194,11 @@ impl PayloadStorage {
             return (page_id, block_offset);
         }
         // else we need new page(s)
-        let num_pages = (num_blocks as usize * BLOCK_SIZE_BYTES).div_ceil(self.new_page_size);
+        let trailing_free_blocks = self.bitmask.trailing_free_blocks();
+
+        let missing_blocks = num_blocks.saturating_sub(trailing_free_blocks) as usize;
+
+        let num_pages = (missing_blocks * BLOCK_SIZE_BYTES).div_ceil(self.new_page_size);
         for _ in 0..num_pages {
             self.create_new_page();
         }
@@ -643,11 +647,9 @@ mod tests {
     #[test]
     fn test_handle_huge_payload() {
         let (_dir, mut storage) = empty_storage();
+        assert_eq!(storage.pages.len(), 1);
 
         let mut payload = Payload::default();
-        payload
-            .0
-            .insert("key".to_string(), Value::String("value".to_string()));
 
         let huge_payload_size = 1024 * 1024 * 50; // 50MB
 
