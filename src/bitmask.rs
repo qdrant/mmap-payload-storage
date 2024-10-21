@@ -2,6 +2,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use bitvec::slice::BitSlice;
+use itertools::Itertools;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::{BlockOffset, PageId};
@@ -14,6 +15,7 @@ pub const REGION_SIZE_BLOCKS: usize = 8_192;
 
 type RegionId = u32;
 
+/// Gaps of contiguous zeros in a bitmask region.
 #[derive(Debug, Clone)]
 struct Gaps {
     max: u16,
@@ -25,16 +27,15 @@ impl Gaps {
     fn new(leading: u16, trailing: u16, max: u16) -> Self {
         #[cfg(debug_assertions)]
         {
-            assert!(max <= REGION_SIZE_BLOCKS as u16, "Unexpected max gap size");
+            let maximum_possible = REGION_SIZE_BLOCKS as u16;
+            
+            assert!(max <= maximum_possible, "Unexpected max gap size");
 
-            assert!(leading <= max, "Invalid gaps {}/{}", leading, max);
+            assert!(leading <= max, "Invalid gaps: leading is {}, but max is {}", leading, max);
 
-            assert!(trailing <= max, "Invalid gaps {}/{}", trailing, max);
+            assert!(trailing <= max, "Invalid gaps: trailing is {}, but max is {}", trailing, max);
 
-            if leading == REGION_SIZE_BLOCKS as u16 {
-                assert_eq!(leading, trailing);
-            }
-            if trailing == REGION_SIZE_BLOCKS as u16 {
+            if leading == maximum_possible || trailing == maximum_possible {
                 assert_eq!(leading, trailing);
             }
         }
@@ -75,23 +76,14 @@ pub struct Bitmask {
 }
 
 impl Bitmask {
-    /// Calculate the leading and trailing gaps of a region.
+    /// Calculate the amount of trailing free blocks in the bitmask.
     pub fn trailing_free_blocks(&self) -> u32 {
-        let first_not_empty_from_the_end = self
-            .region_gaps
+        self.region_gaps
             .iter()
             .rev()
-            .position(|gap| !gap.is_empty());
-
-        match first_not_empty_from_the_end {
-            Some(index) => {
-                let num_empty_regions = self.region_gaps.len() - index - 1;
-                let sum_of_empty_regions = (num_empty_regions * REGION_SIZE_BLOCKS) as u32;
-                let last_trailing = self.region_gaps[index].trailing as u32;
-                sum_of_empty_regions + last_trailing
-            }
-            None => (self.region_gaps.len() * REGION_SIZE_BLOCKS) as u32,
-        }
+            .take_while_inclusive(|gap| gap.trailing == REGION_SIZE_BLOCKS as u16)
+            .map(|gap| gap.trailing as u32)
+            .sum()
     }
 
     /// Calculate the amount of bytes needed for covering the blocks of a page.

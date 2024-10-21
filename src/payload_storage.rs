@@ -15,6 +15,7 @@ pub const BLOCK_SIZE_BYTES: usize = 128;
 pub struct PayloadStorage {
     tracker: Tracker,
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
+    // TODO: turn hashmap into vec, all page ids are sequential now
     pub(super) pages: HashMap<u32, Page>, // page_id -> mmap page
     bitmask: Bitmask,
     next_page_id: u32,
@@ -41,7 +42,7 @@ impl PayloadStorage {
         for tracker_file in self.tracker.files() {
             paths.push(tracker_file);
         }
-        // slotted pages files
+        // pages files
         for pages in self.pages.keys() {
             paths.push(self.page_path(*pages));
         }
