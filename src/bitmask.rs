@@ -358,40 +358,45 @@ impl Bitmask {
         let mut bitvec = BitVec::<usize, Lsb0>::from_bitslice(bitslice);
         let mut current_size: u32 = 0;
         let mut current_start: u32 = 0;
-        let mut bit_idx = 0;
+        let mut num_shifts = 0;
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
         const BITS_IN_CHUNK: u32 = usize::BITS;
-        for (chunk_idx, &mut mut chunk) in bitvec.as_raw_mut_slice().iter_mut().enumerate() {
-            if chunk == 0 {
-                current_size += BITS_IN_CHUNK;
-                // TODO: optimize the case of all ones too.
-            } else {
-                while bit_idx < BITS_IN_CHUNK {
-                    if (chunk & 1) == 0 {
-                        current_size += 1;
-                        if current_size >= num_blocks {
-                            // bingo - we found a free cell of num_blocks
-                            return Some(translate_to_answer(current_start));
-                        }
-                        chunk >>= 1;
-                        bit_idx += 1;
-                    } else {
-                        while chunk & 1 == 1 {
-                            // Skip over consecutive ones
-                            chunk >>= 1;
-                            bit_idx += 1;
-                        }
-                        current_size = 0;
-                        current_start = chunk_idx as u32 * BITS_IN_CHUNK + bit_idx;
-                    }
+        for (chunk_idx, &mut mut chunk) in bitvec.as_raw_mut_slice().into_iter().enumerate() {
+            while chunk != 0 {
+                let num_zeros = chunk.trailing_zeros();
+                current_size += num_zeros;
+                if current_size >= num_blocks {
+                    // bingo - we found a free cell of num_blocks
+                    return Some(translate_local_index(current_start));
                 }
-                bit_idx = 0;
+
+                // shift by the number of zeros
+                chunk >>= num_zeros as usize;
+                num_shifts += num_zeros;
+
+                // skip consecutive ones
+                let num_ones = chunk.trailing_ones();
+                if num_ones < BITS_IN_CHUNK {
+                    chunk >>= num_ones;
+                } else {
+                    // all ones
+                    debug_assert!(chunk == !0);
+                    chunk = 0;
+                }
+                num_shifts += num_ones;
+
+                current_size = 0;
+                current_start = chunk_idx as u32 * BITS_IN_CHUNK + num_shifts;
             }
-            if current_size >= num_blocks {
-                // bingo - we found a free cell of num_blocks
-                return Some(translate_to_answer(current_start));
-            }
+            // no more ones in the chunk
+            current_size += BITS_IN_CHUNK - num_shifts;
+            num_shifts = 0;
         }
+        if current_size >= num_blocks {
+            // bingo - we found a free cell of num_blocks
+            return Some(translate_local_index(current_start));
+        }
+
         None
     }
 
@@ -437,9 +442,7 @@ impl Bitmask {
         // copy slice into bitvec
         // TODO: make shifting and counting leading/trailing depend on the native Lsb0 or Msb0
         // (or what we set the bitslice to be)
-        let mut bitvec = BitVec::<usize, Lsb0>::new();
-        bitvec.extend_from_bitslice(region);
-
+        let mut bitvec = BitVec::<usize, Lsb0>::from_bitslice(region);
         let mut max = 0;
         let mut current = 0;
 
