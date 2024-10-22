@@ -5,13 +5,14 @@ use serde_json::Value;
 
 pub fn real_data_data_bench(c: &mut Criterion) {
     let (_dir, mut storage) = empty_storage();
-
     let csv_data = include_str!("../data/h&m-articles.csv");
-    let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
-    let mut point_offset = 0;
+    let csv_data_bytes = csv_data.as_bytes();
+    let expected_point_count = 105_542;
 
     c.bench_function("write real payload", |b| {
         b.iter(|| {
+            let mut rdr = csv::Reader::from_reader(csv_data_bytes);
+            let mut point_offset = 0;
             for result in rdr.records() {
                 let record = result.unwrap();
                 let mut payload = Payload::default();
@@ -24,13 +25,13 @@ pub fn real_data_data_bench(c: &mut Criterion) {
                 storage.put_payload(point_offset, &payload);
                 point_offset += 1;
             }
+            assert_eq!(point_offset, expected_point_count);
         });
     });
-    assert_eq!(point_offset, 105_542);
 
     c.bench_function("read real payload", |b| {
         b.iter(|| {
-            for i in 0..point_offset {
+            for i in 0..expected_point_count {
                 let res = storage.get_payload(i).unwrap();
                 assert!(res.0.contains_key("article_id"));
             }
