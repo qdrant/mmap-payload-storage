@@ -1,7 +1,9 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use bitvec::order::Msb0;
 use bitvec::slice::BitSlice;
+use bitvec::vec::BitVec;
 use itertools::Itertools;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
@@ -17,7 +19,7 @@ type RegionId = u32;
 
 /// Gaps of contiguous zeros in a bitmask region.
 #[derive(Debug, Clone)]
-struct Gaps {
+pub struct Gaps {
     max: u16,
     leading: u16,
     trailing: u16,
@@ -415,68 +417,90 @@ impl Bitmask {
         }
     }
 
-    fn calculate_gaps(region: &BitSlice) -> Gaps {
-        debug_assert_eq!(region.len(), REGION_SIZE_BLOCKS, "Unexpected region size");
-        debug_assert!(!region.is_empty(), "region cannot be empty");
+    pub fn calculate_gaps(region: &BitSlice) -> Gaps {
+        debug_assert_eq!(
+            region.len(),
+            REGION_SIZE_BLOCKS as usize,
+            "Unexpected region size"
+        );
         // copy slice into bitvec
-        let mut bitvec = region.to_bitvec();
+        let mut bitvec = BitVec::<usize, Msb0>::new();
+        bitvec.extend_from_bitslice(region);
 
         let mut max = 0;
         let mut current = 0;
 
-        // Example, instead of using u64, let's use u8 for simplicity
+        // 001100010
         //
-        // 0b00000000 -> 0
-        // 0b00000001 -> 1
+        // num_zeros = 2
         //
-        // EXAMPLE: 11100000 00110001
-        // current: 0
-        // max: 3
+        // current += 2 = 2
         //
-        // 00110001 AND 00000001 = 1
-        // shift right
-        // 00011000 AND 00000001 = 0
-        // increment current
+        // max = 2
+        // current = 0
         //
-        // shift right
-        // increment current
+        // shift left
+        // 110001000
+        // shifts = 2
         //
-        // shift right
-        // increment current
+        // leading_ones = 2
+        // shift left
+        // 000100000
+        // shifts = 4
         //
-        // shift right
-        // 00000011 AND 00000001 = 1
-        // update max
-        // set current to zero
+        // leading_zeros = 3
+        // current += 3 = 3
         //
-        // shift right
-        // 00000001 AND 00000001 = 1
-        // set current to zero
+        // max = 3
+        // current = 0
         //
-        // shift right
-        // chunk == 00000000
+        // shift left
+        // 100000000
+        // shifts = 7
         //
-        // ... TBC
-
+        // leading_ones = 1
+        // shift left
+        // 000000000
+        // shifts = 8
+        //
+        // chunk == 0
+        // current += 8 - 8 = 0
+        // break
+        //
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
         const BITS_IN_CHUNK: u16 = usize::BITS as u16;
-        for &mut mut chunk in bitvec.as_raw_mut_slice().iter_mut() {
-            if chunk == 0 {
-                current += BITS_IN_CHUNK;
-            } else {
-                for _ in 0..BITS_IN_CHUNK {
-                    if (chunk & 1) == 0 {
-                        current += 1;
-                    } else {
-                        if current > max {
-                            max = current;
-                        }
-                        current = 0;
-                    }
-                    chunk >>= 1;
+        let mut num_shifts = 0;
+        for &mut mut chunk in bitvec.as_raw_mut_slice().into_iter() {
+            while chunk != 0 {
+                // count leading zeros
+                let num_zeros = chunk.leading_zeros() as u16;
+                current += num_zeros;
+                if current > max {
+                    max = current;
                 }
+                current = 0;
+
+                // shift left by the number of zeros
+                chunk <<= num_zeros as usize;
+                num_shifts += num_zeros;
+
+                // skip consecutive ones
+                let num_ones = chunk.leading_ones() as u16;
+                if num_ones < BITS_IN_CHUNK {
+                    chunk <<= num_ones;
+                } else {
+                    // all ones
+                    debug_assert!(chunk == usize::MAX);
+                    chunk = 0;
+                }
+                num_shifts += num_ones;
             }
+            
+            // no more ones in the chunk
+            current += BITS_IN_CHUNK - num_shifts;
+            num_shifts = 0;
         }
+
         if current > max {
             max = current;
         }
@@ -497,6 +521,8 @@ impl Bitmask {
 
 #[cfg(test)]
 mod tests {
+    use bitvec::{bits, order::Msb0, vec::BitVec};
+
     use crate::{bitmask::REGION_SIZE_BLOCKS, payload_storage::BLOCK_SIZE_BYTES};
 
     #[test]
@@ -554,5 +580,26 @@ mod tests {
         assert_eq!(found_large, None);
     }
 
+    #[test]
+    fn test_raw_bitvec() {
+        use bitvec::prelude::Lsb0;
+        let bits = bits![
+            0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1
+        ];
+
+        let mut bitvec = BitVec::<usize, Msb0>::new();
+        bitvec.extend_from_bitslice(bits);
+
+        assert_eq!(bitvec.len(), 64);
+        
+        let raw = bitvec.as_raw_slice();
+        assert_eq!(raw.len() as u32, 64 / usize::BITS);
+        
+        assert_eq!(raw[0].leading_zeros(), 4);
+        assert_eq!(raw[0].trailing_zeros(), 0);
+        assert_eq!((raw[0] << 1).leading_zeros(), 3)
+    }
     // TODO: proptest!!! (for find_available blocks)
 }

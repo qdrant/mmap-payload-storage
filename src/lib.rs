@@ -1,4 +1,4 @@
-mod bitmask;
+pub mod bitmask;
 pub mod fixtures;
 mod page;
 pub mod payload;
