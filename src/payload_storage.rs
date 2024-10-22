@@ -341,7 +341,7 @@ impl PayloadStorage {
     where
         F: FnMut(PointOffset, &Payload) -> std::io::Result<bool>,
     {
-        for pointer in self.tracker.iter_pointers().filter_map(|x| x) {
+        for pointer in self.tracker.iter_pointers().flatten() {
             let ValuePointer {
                 page_id,
                 block_offset,
