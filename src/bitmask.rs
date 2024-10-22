@@ -330,10 +330,10 @@ impl Bitmask {
         let regions_start_offset = region_id_range.start as usize * REGION_SIZE_BLOCKS;
         let regions_end_offset = region_id_range.end as usize * REGION_SIZE_BLOCKS;
 
-        let translate_to_answer = |current_start: u32| {
+        let translate_to_answer = |local_index: u32| {
             let page_size_in_blocks = self.page_size / BLOCK_SIZE_BYTES;
 
-            let global_cursor_offset = current_start as usize + regions_start_offset;
+            let global_cursor_offset = local_index as usize + regions_start_offset;
 
             // Calculate the page id and the block offset within the page
             let page_id = global_cursor_offset.div_euclid(page_size_in_blocks);
@@ -344,7 +344,18 @@ impl Bitmask {
 
         let regions_bitslice = &self.bitslice[regions_start_offset..regions_end_offset];
 
-        let mut bitvec = regions_bitslice.to_bitvec();
+        Self::find_available_blocks_in_slice(regions_bitslice, num_blocks, translate_to_answer)
+    }
+
+    pub fn find_available_blocks_in_slice<F>(
+        bitslice: &BitSlice,
+        num_blocks: u32,
+        translate_local_index: F,
+    ) -> Option<(PageId, BlockOffset)>
+    where
+        F: FnOnce(u32) -> (PageId, BlockOffset),
+    {
+        let mut bitvec = BitVec::<usize, Lsb0>::from_bitslice(bitslice);
         let mut current_size: u32 = 0;
         let mut current_start: u32 = 0;
         let mut bit_idx = 0;
