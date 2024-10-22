@@ -3,7 +3,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mmap_payload_storage::bitmask::{Bitmask, REGION_SIZE_BLOCKS};
 use rand::{thread_rng, Rng};
 
-pub fn bench_calculate_gaps(c: &mut Criterion) {
+pub fn bench_bitmask_ops(c: &mut Criterion) {
     let distr = rand::distributions::Standard;
     let rng = thread_rng();
     let random_bitvec = rng
@@ -30,5 +30,5 @@ pub fn bench_calculate_gaps(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_calculate_gaps);
+criterion_group!(benches, bench_bitmask_ops);
 criterion_main!(benches);
