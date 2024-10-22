@@ -1,22 +1,30 @@
-use crate::page_tracker::{PagePointer, PageTracker, PointOffset};
+use crate::bitmask::Bitmask;
+use crate::page::Page;
 use crate::payload::Payload;
-use crate::slotted_page::SlottedPageMmap;
+use crate::tracker::{BlockOffset, PageId, PointOffset, Tracker, ValuePointer};
+
 use lz4_flex::compress_prepend_size;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Expect JSON values to have roughly 3–5 fields with mostly small values.
+/// For 1M values, this would require 128MB of memory.
+pub const BLOCK_SIZE_BYTES: usize = 128;
+
 #[derive(Debug)]
 pub struct PayloadStorage {
-    page_tracker: PageTracker,
+    tracker: Tracker,
     pub(super) new_page_size: usize, // page size in bytes when creating new pages
-    pub(super) pages: HashMap<u32, SlottedPageMmap>, // page_id -> mmap page
-    max_page_id: u32,
+    // TODO: turn hashmap into vec, all page ids are sequential now
+    pub(super) pages: HashMap<u32, Page>, // page_id -> mmap page
+    bitmask: Bitmask,
+    next_page_id: u32,
     base_path: PathBuf,
 }
 
 impl PayloadStorage {
     /// Default page size used when not specified
-    const DEFAULT_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
+    pub const PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
 
     /// LZ4 compression
     fn compress(value: &[u8]) -> Vec<u8> {
@@ -31,82 +39,126 @@ impl PayloadStorage {
     pub fn files(&self) -> Vec<PathBuf> {
         let mut paths = Vec::with_capacity(self.pages.len() + 1);
         // page tracker file
-        for tracker_file in self.page_tracker.files() {
+        for tracker_file in self.tracker.files() {
             paths.push(tracker_file);
         }
-        // slotted pages files
+        // pages files
         for pages in self.pages.keys() {
             paths.push(self.page_path(*pages));
         }
         paths
     }
 
+    /// Initializes a new storage with a single empty page.
     pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
-        Self {
-            page_tracker: PageTracker::new(&path, None),
-            new_page_size: page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
+        let page_size = page_size.unwrap_or(Self::PAGE_SIZE_BYTES);
+        let mut storage = Self {
+            tracker: Tracker::new(&path, None),
+            new_page_size: page_size,
             pages: HashMap::new(),
-            max_page_id: 0,
+            bitmask: Bitmask::with_capacity(path.clone(), page_size),
+            next_page_id: 0,
             base_path: path,
-        }
+        };
+
+        // create first page to be covered by the bitmask
+        let new_page_id = storage.next_page_id;
+        let path = storage.page_path(new_page_id);
+        let page = Page::new(&path, storage.new_page_size);
+        let was_created = storage.add_page(new_page_id, page);
+        assert!(was_created);
+
+        storage
     }
 
     /// Open an existing PayloadStorage at the given path
     /// Returns None if the storage does not exist
     pub fn open(path: PathBuf, new_page_size: Option<usize>) -> Option<Self> {
-        let page_tracker = PageTracker::open(&path)?;
-        let page_ids = page_tracker.all_page_ids();
+        let new_page_size = new_page_size.unwrap_or(Self::PAGE_SIZE_BYTES);
+
+        let page_tracker = Tracker::open(&path)?;
+
+        let bitmask = Bitmask::open(path.clone(), new_page_size);
+
+        let num_pages = bitmask.infer_num_pages();
+
         // load pages
         let mut storage = Self {
-            page_tracker,
-            new_page_size: new_page_size.unwrap_or(Self::DEFAULT_PAGE_SIZE_BYTES),
+            tracker: page_tracker,
+            new_page_size,
             pages: Default::default(),
-            max_page_id: 0,
+            bitmask,
+            next_page_id: 0,
             base_path: path.clone(),
         };
-        for page_id in page_ids {
+        for page_id in 0..num_pages as PageId {
             let page_path = storage.page_path(page_id);
-            let slotted_page = SlottedPageMmap::open(&page_path).expect("Page not found");
+            let slotted_page = Page::open(&page_path).expect("Page not found");
 
             storage.add_page(page_id, slotted_page);
         }
         Some(storage)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.pages.is_empty()
-    }
-
     /// Get the path for a given page id
     pub fn page_path(&self, page_id: u32) -> PathBuf {
-        self.base_path
-            .join(format!("slotted_paged_{}.dat", page_id))
+        self.base_path.join(format!("page_{}.dat", page_id))
     }
 
     /// Add a page to the storage. If it already exists, returns false
-    fn add_page(&mut self, page_id: u32, page: SlottedPageMmap) -> bool {
+    fn add_page(&mut self, page_id: u32, page: Page) -> bool {
         let page_exists = self.pages.contains_key(&page_id);
         if page_exists {
             return false;
         }
 
+        debug_assert_eq!(page_id, self.next_page_id, "Page id mismatch");
+
         let previous = self.pages.insert(page_id, page);
         debug_assert!(previous.is_none());
 
-        if page_id > self.max_page_id {
-            self.max_page_id = page_id;
-        }
+        self.next_page_id += 1;
 
         true
     }
 
+    /// Read value from the pages. Considering that they can span more than one page.
+    fn read_from_pages(
+        &self,
+        start_page_id: PageId,
+        mut block_offset: BlockOffset,
+        mut length: u32,
+    ) -> Vec<u8> {
+        let mut raw_sections = vec![];
+
+        for page_id in start_page_id.. {
+            let page = self.pages.get(&page_id).expect("Page not found");
+            let (raw, unread_bytes) = page.read_value(block_offset, length);
+            raw_sections.extend(raw);
+
+            if unread_bytes == 0 {
+                break;
+            }
+
+            block_offset = 0;
+            length = unread_bytes as u32;
+        }
+
+        raw_sections
+    }
+
     /// Get the payload for a given point offset
     pub fn get_payload(&self, point_offset: PointOffset) -> Option<Payload> {
-        let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
-        let page = self.pages.get(&page_id).expect("Page not found");
-        let raw = page.get_value(&slot_id).expect("Slot not found");
-        let decompressed = Self::decompress(raw);
+        let ValuePointer {
+            page_id,
+            block_offset,
+            length,
+        } = self.get_pointer(point_offset)?;
+
+        let raw = self.read_from_pages(page_id, block_offset, length);
+        let decompressed = Self::decompress(&raw);
         let payload = Payload::from_bytes(&decompressed);
+
         Some(payload)
     }
 
@@ -114,28 +166,75 @@ impl PayloadStorage {
     /// If size is None, the page will have the default size
     ///
     /// Returns the new page id
-    fn create_new_page(&mut self, size: usize) -> u32 {
-        let new_page_id = self.max_page_id + 1;
+    fn create_new_page(&mut self) -> u32 {
+        let new_page_id = self.next_page_id;
         let path = self.page_path(new_page_id);
-        let was_created = self.add_page(new_page_id, SlottedPageMmap::new(&path, size));
-
+        let page = Page::new(&path, self.new_page_size);
+        let was_created = self.add_page(new_page_id, page);
         assert!(was_created);
+
+        self.bitmask.cover_new_page();
 
         new_page_id
     }
 
-    /// Create a new page adapted to the payload size and return its id.
-    /// The page size will be the next power of two of the payload size, with a minimum of `self.page_size`.
-    fn create_new_page_for_payload(&mut self, payload_size: usize) -> u32 {
-        let required_size = SlottedPageMmap::new_page_size_for_value(payload_size);
-        // return the smallest power of two greater than or equal to the required size if it is greater than the default page size
-        let real_size = self.new_page_size.max(required_size).next_power_of_two();
-        self.create_new_page(real_size)
+    /// Get the mapping for a given point offset
+    fn get_pointer(&self, point_offset: PointOffset) -> Option<ValuePointer> {
+        self.tracker.get(point_offset)
     }
 
-    /// Get the mapping for a given point offset
-    fn get_pointer(&self, point_offset: PointOffset) -> Option<PagePointer> {
-        self.page_tracker.get(point_offset)
+    /// The number of blocks needed for a given value bytes size
+    fn blocks_for_value(value_size: usize) -> u32 {
+        value_size.div_ceil(BLOCK_SIZE_BYTES).try_into().unwrap()
+    }
+
+    fn find_or_create_available_blocks(&mut self, num_blocks: u32) -> (PageId, BlockOffset) {
+        debug_assert!(num_blocks > 0, "num_blocks must be greater than 0");
+
+        if let Some((page_id, block_offset)) = self.bitmask.find_available_blocks(num_blocks) {
+            return (page_id, block_offset);
+        }
+        // else we need new page(s)
+        let trailing_free_blocks = self.bitmask.trailing_free_blocks();
+
+        let missing_blocks = num_blocks.saturating_sub(trailing_free_blocks) as usize;
+
+        let num_pages = (missing_blocks * BLOCK_SIZE_BYTES).div_ceil(self.new_page_size);
+        for _ in 0..num_pages {
+            self.create_new_page();
+        }
+
+        // At this point we are sure that we have enough free pages to allocate the blocks
+        self.bitmask.find_available_blocks(num_blocks).unwrap()
+    }
+
+    /// Write value into a new cell, considering that it can span more than one page
+    fn write_into_pages(
+        &mut self,
+        value: &[u8],
+        start_page_id: PageId,
+        mut block_offset: BlockOffset,
+    ) {
+        let payload_size = value.len();
+
+        // Track the number of bytes that still need to be written
+        let mut unwritten_tail = payload_size;
+
+        for page_id in start_page_id.. {
+            let page = self
+                .pages
+                .get_mut(&page_id)
+                .expect(&format!("Page {page_id} not found"));
+
+            let range = (payload_size - unwritten_tail)..;
+            unwritten_tail = page.write_value(block_offset, &value[range]);
+
+            if unwritten_tail == 0 {
+                break;
+            }
+
+            block_offset = 0;
+        }
     }
 
     /// Put a payload in the storage.
@@ -146,29 +245,47 @@ impl PayloadStorage {
         let comp_payload = Self::compress(&payload_bytes);
         let payload_size = comp_payload.len();
 
-        if let Some(PagePointer { page_id, slot_id }) = self.get_pointer(point_offset) {
-            // this is an update
+        let required_blocks = Self::blocks_for_value(payload_size);
+        let (start_page_id, block_offset) = self.find_or_create_available_blocks(required_blocks);
 
-            // TODO:
-            // - insert into a new cell
-            // - update the pointer
-            // - mark the old cell blocks as available in the bitmask
-            // - mark the new cell blocks as used in the bitmask
-            // - recompute bitmask gaps
+        // In case of crashing somewhere in the middle of this operation, the worst
+        // that should happen is that we mark more cells as used than they actually are,
+        // so will never reuse such space, but data will not be corrupted.
 
-            true
-        } else {
-            // this is a new payload
+        // insert into a new cell, considering that it can span more than one page
+        self.write_into_pages(&comp_payload, start_page_id, block_offset);
 
-            // TODO:
-            // - find page and offset which fits the payload
-            // - insert the payload
-            // - update the index
-            // - mark the cell blocks as used in the bitmask
-            // - recompute bitmask gaps
+        // mark new cell as used in the bitmask
+        self.bitmask
+            .mark_blocks(start_page_id, block_offset, required_blocks, true);
 
-            false
+        // update the pointer
+        let old_pointer_opt = self.get_pointer(point_offset);
+        self.tracker.set(
+            point_offset,
+            ValuePointer {
+                page_id: start_page_id,
+                block_offset,
+                length: payload_size as u32,
+            },
+        );
+
+        // Check if it is a payload update.
+        if let Some(old_pointer) = old_pointer_opt {
+            // mark old cell as available in the bitmask
+            self.bitmask.mark_blocks(
+                old_pointer.page_id,
+                old_pointer.block_offset,
+                Self::blocks_for_value(old_pointer.length as usize),
+                false,
+            );
         }
+
+        // TODO:
+        // - recompute bitmask gaps
+
+        // return whether it was an update or not
+        old_pointer_opt.is_some()
     }
 
     /// Delete a payload from the storage
@@ -177,16 +294,27 @@ impl PayloadStorage {
     ///
     /// Returns the deleted payload otherwise
     pub fn delete_payload(&mut self, point_offset: PointOffset) -> Option<Payload> {
-        let PagePointer { page_id, slot_id } = self.get_pointer(point_offset)?;
-        let page = self.pages.get_mut(&page_id).expect("Page not found");
-        // get current value
-        let raw = page.get_value(&slot_id).expect("Slot not found");
-        let decompressed = Self::decompress(raw);
+        let ValuePointer {
+            page_id,
+            block_offset,
+            length,
+        } = self.get_pointer(point_offset)?;
+        let raw = self.read_from_pages(page_id, block_offset, length);
+        let decompressed = Self::decompress(&raw);
         let payload = Payload::from_bytes(&decompressed);
-        // delete value from page
-        page.delete_value(slot_id);
+
         // delete mapping
-        self.page_tracker.unset(point_offset);
+        self.tracker.unset(point_offset);
+
+        // mark cell as available in the bitmask
+        self.bitmask.mark_blocks(
+            page_id,
+            block_offset,
+            Self::blocks_for_value(length as usize),
+            false,
+        );
+
+        // TODO: recompute bitmask gaps
         Some(payload)
     }
 
@@ -200,27 +328,31 @@ impl PayloadStorage {
 
     /// Flush all mmap pages to disk
     pub fn flush(&self) -> std::io::Result<()> {
-        self.page_tracker.flush()?;
+        self.tracker.flush()?;
         for page in self.pages.values() {
             page.flush()?;
         }
+        // TODO: flush the bitmask AND the gaps
         Ok(())
     }
 
+    /// Iterate over all the payloads in the storage
     pub fn iter<F>(&self, mut callback: F) -> std::io::Result<()>
     where
         F: FnMut(PointOffset, &Payload) -> std::io::Result<bool>,
     {
-        for page in self.pages.values() {
-            for (slot, value) in page.iter_slot_values_starting_from(0) {
-                if let Some(value) = value {
-                    let decompressed = Self::decompress(value);
-                    let payload = Payload::from_bytes(&decompressed);
-                    let point_offset = slot.point_offset();
-                    if !callback(point_offset, &payload)? {
-                        return Ok(());
-                    }
-                }
+        for pointer in self.tracker.iter_pointers().flatten() {
+            let ValuePointer {
+                page_id,
+                block_offset,
+                length,
+            } = pointer;
+
+            let raw = self.read_from_pages(page_id, block_offset, length);
+            let decompressed = Self::decompress(&raw);
+            let payload = Payload::from_bytes(&decompressed);
+            if !callback(block_offset, &payload)? {
+                return Ok(());
             }
         }
         Ok(())
@@ -232,7 +364,10 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    use crate::fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS};
+    use crate::{
+        bitmask::REGION_SIZE_BLOCKS,
+        fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS},
+    };
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
     use rstest::rstest;
     use tempfile::Builder;
@@ -251,7 +386,7 @@ mod tests {
         let payload = Payload::default();
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -269,11 +404,11 @@ mod tests {
 
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
-        assert_eq!(page_mapping.page_id, 1); // first page
-        assert_eq!(page_mapping.slot_id, 0); // first slot
+        assert_eq!(page_mapping.page_id, 0); // first page
+        assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -291,11 +426,11 @@ mod tests {
 
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
         let files = storage.files();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].file_name().unwrap(), "page_tracker.dat");
-        assert_eq!(files[1].file_name().unwrap(), "slotted_paged_1.dat");
+        assert_eq!(files[1].file_name().unwrap(), "page_0.dat");
     }
 
     #[test]
@@ -313,7 +448,7 @@ mod tests {
 
             let stored_payload = storage.get_payload(*point_offset);
             assert!(stored_payload.is_some());
-            assert_eq!(stored_payload.unwrap(), payload.clone());
+            assert_eq!(&stored_payload.unwrap(), payload);
         }
 
         // read randomly
@@ -338,8 +473,8 @@ mod tests {
         assert_eq!(storage.pages.len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
-        assert_eq!(page_mapping.page_id, 1); // first page
-        assert_eq!(page_mapping.slot_id, 0); // first slot
+        assert_eq!(page_mapping.page_id, 0); // first page
+        assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
         assert_eq!(stored_payload, Some(payload));
@@ -365,11 +500,11 @@ mod tests {
 
         storage.put_payload(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
-        assert_eq!(page_mapping.page_id, 1); // first page
-        assert_eq!(page_mapping.slot_id, 0); // first slot
+        assert_eq!(page_mapping.page_id, 0); // first page
+        assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
@@ -383,11 +518,34 @@ mod tests {
 
         storage.put_payload(0, &updated_payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.page_tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.mapping_len(), 1);
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
         assert_eq!(stored_payload.unwrap(), updated_payload);
+    }
+
+    #[test]
+    fn test_write_across_pages() {
+        let page_size = BLOCK_SIZE_BYTES * REGION_SIZE_BLOCKS;
+        let (_dir, mut storage) = empty_storage_sized(page_size);
+
+        storage.create_new_page();
+
+        let value_len = 1000;
+
+        // Value should span 8 blocks
+        let value = (0..)
+            .map(|i| (i % 24) as u8)
+            .take(value_len)
+            .collect::<Vec<_>>();
+
+        // Let's write it near the end
+        let block_offset = REGION_SIZE_BLOCKS - 10;
+        storage.write_into_pages(&value, 0, block_offset as u32);
+
+        let read_value = storage.read_from_pages(0, block_offset as u32, value_len as u32);
+        assert_eq!(value, read_value);
     }
 
     enum Operation {
@@ -418,7 +576,9 @@ mod tests {
     }
 
     #[rstest]
-    fn test_behave_like_hashmap(#[values(10, 10_000, 32_000_000)] page_size: usize) {
+    fn test_behave_like_hashmap(
+        #[values(1_048_576, 2_097_152, PayloadStorage::PAGE_SIZE_BYTES)] page_size: usize,
+    ) {
         let (dir, mut storage) = empty_storage_sized(page_size);
 
         let rng = &mut rand::thread_rng();
@@ -454,7 +614,7 @@ mod tests {
         }
 
         // asset same length
-        assert_eq!(storage.page_tracker.mapping_len(), model_hashmap.len());
+        assert_eq!(storage.tracker.mapping_len(), model_hashmap.len());
 
         // validate storage and model_hashmap are the same
         for point_offset in 0..=max_point_offset {
@@ -470,7 +630,7 @@ mod tests {
         let storage = PayloadStorage::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
 
         // asset same length
-        assert_eq!(storage.page_tracker.mapping_len(), model_hashmap.len());
+        assert_eq!(storage.tracker.mapping_len(), model_hashmap.len());
 
         // validate storage and model_hashmap are the same
         for point_offset in 0..=max_point_offset {
@@ -488,11 +648,9 @@ mod tests {
     #[test]
     fn test_handle_huge_payload() {
         let (_dir, mut storage) = empty_storage();
+        assert_eq!(storage.pages.len(), 1);
 
         let mut payload = Payload::default();
-        payload
-            .0
-            .insert("key".to_string(), Value::String("value".to_string()));
 
         let huge_payload_size = 1024 * 1024 * 50; // 50MB
 
@@ -503,40 +661,32 @@ mod tests {
         payload.0.insert("huge".to_string(), huge_value);
 
         storage.put_payload(0, &payload);
-        assert_eq!(storage.pages.len(), 1);
+        assert_eq!(storage.pages.len(), 2);
 
         let page_mapping = storage.get_pointer(0).unwrap();
-        assert_eq!(page_mapping.page_id, 1); // first page
-        assert_eq!(page_mapping.slot_id, 0); // first slot
+        assert_eq!(page_mapping.page_id, 0); // first page
+        assert_eq!(page_mapping.block_offset, 0); // first cell
 
         let stored_payload = storage.get_payload(0);
         assert!(stored_payload.is_some());
         assert_eq!(stored_payload.unwrap(), payload);
 
         {
-            let page = storage.pages.get(&1).unwrap();
-
             // the fitting page should be 64MB, so we should still have about 14MB of free space
-            let free_space = page.free_space();
-            assert!(
-                free_space > 1024 * 1024 * 13 && free_space < 1024 * 1024 * 15,
-                "free space should be around 14MB, but it is: {}",
-                free_space
-            );
+            let free_blocks = storage.bitmask.free_blocks_for_page(1);
+            let min_expected = 1024 * 1024 * 13 / BLOCK_SIZE_BYTES;
+            let max_expected = 1024 * 1024 * 15 / BLOCK_SIZE_BYTES;
+            assert!((min_expected..max_expected).contains(&free_blocks));
         }
 
         {
             // delete payload
             let deleted = storage.delete_payload(0);
             assert!(deleted.is_some());
-            assert_eq!(storage.pages.len(), 1);
+            assert_eq!(storage.pages.len(), 2);
 
             assert!(storage.get_payload(0).is_none());
         }
-
-        // the page has been reclaimed completely
-        assert!(!storage.pages.contains_key(&1));
-        assert!(storage.page_tracker.get(0).is_none());
     }
 
     #[test]
@@ -556,8 +706,8 @@ mod tests {
             assert_eq!(storage.pages.len(), 1);
 
             let page_mapping = storage.get_pointer(0).unwrap();
-            assert_eq!(page_mapping.page_id, 1); // first page
-            assert_eq!(page_mapping.slot_id, 0); // first slot
+            assert_eq!(page_mapping.page_id, 0); // first page
+            assert_eq!(page_mapping.block_offset, 0); // first cell
 
             let stored_payload = storage.get_payload(0);
             assert!(stored_payload.is_some());
@@ -631,14 +781,14 @@ mod tests {
         // load data into storage
         let point_offset = write_data(&mut storage, 0);
         assert_eq!(point_offset, EXPECTED_LEN as u32);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN);
+        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN);
         assert_eq!(storage.pages.len(), 2);
 
         // write the same payload a second time
         let point_offset = write_data(&mut storage, point_offset);
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
+        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN * 2);
         assert_eq!(storage.pages.len(), 4);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent
         storage_double_pass_is_consistent(&storage, 0);
@@ -650,7 +800,7 @@ mod tests {
         let mut storage = PayloadStorage::open(dir.path().to_path_buf(), None).unwrap();
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 4);
-        assert_eq!(storage.page_tracker.mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent after reopening
         storage_double_pass_is_consistent(&storage, 0);

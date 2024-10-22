@@ -8,7 +8,7 @@ bustle = "0.5.1"
 mmap-payload-storage = { path = ".." }
 parking_lot = "0.12.3"
 rocksdb = "0.22.0"
-serde_json = "1.0.128"
+serde_json = "1.0.132"
 tempfile = "3.13.0"
 
 [profile.bench]
