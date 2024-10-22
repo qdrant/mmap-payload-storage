@@ -46,19 +46,28 @@ impl PayloadStorage {
         for pages in self.pages.keys() {
             paths.push(self.page_path(*pages));
         }
+        // bitmask files
+        for bitmask_file in self.bitmask.files() {
+            paths.push(bitmask_file);
+        }
         paths
     }
 
     /// Initializes a new storage with a single empty page.
-    pub fn new(path: PathBuf, page_size: Option<usize>) -> Self {
+    ///
+    /// `base_path` is the directory where the storage files will be stored.
+    /// It should exist already.
+    pub fn new(base_path: PathBuf, page_size: Option<usize>) -> Self {
+        assert!(base_path.exists(), "Base path does not exist");
+        assert!(base_path.is_dir(), "Base path is not a directory");
         let page_size = page_size.unwrap_or(Self::PAGE_SIZE_BYTES);
         let mut storage = Self {
-            tracker: Tracker::new(&path, None),
+            tracker: Tracker::new(&base_path, None),
             new_page_size: page_size,
             pages: HashMap::new(),
-            bitmask: Bitmask::with_capacity(path.clone(), page_size),
+            bitmask: Bitmask::with_capacity(&base_path, page_size),
             next_page_id: 0,
-            base_path: path,
+            base_path,
         };
 
         // create first page to be covered by the bitmask
@@ -78,7 +87,7 @@ impl PayloadStorage {
 
         let page_tracker = Tracker::open(&path)?;
 
-        let bitmask = Bitmask::open(path.clone(), new_page_size);
+        let bitmask = Bitmask::open(&path, new_page_size)?;
 
         let num_pages = bitmask.infer_num_pages();
 
@@ -428,9 +437,10 @@ mod tests {
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.tracker.mapping_len(), 1);
         let files = storage.files();
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
         assert_eq!(files[0].file_name().unwrap(), "page_tracker.dat");
         assert_eq!(files[1].file_name().unwrap(), "page_0.dat");
+        assert_eq!(files[2].file_name().unwrap(), "bitmask.dat");
     }
 
     #[test]

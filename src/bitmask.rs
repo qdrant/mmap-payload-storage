@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bitvec::slice::BitSlice;
 use itertools::Itertools;
@@ -86,6 +86,10 @@ pub struct Bitmask {
 }
 
 impl Bitmask {
+    pub fn files(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
+
     /// Calculate the amount of trailing free blocks in the bitmask.
     pub fn trailing_free_blocks(&self) -> u32 {
         self.region_gaps
@@ -112,7 +116,7 @@ impl Bitmask {
     }
 
     /// Create a bitmask for one page
-    pub fn with_capacity(dir: PathBuf, page_size: usize) -> Self {
+    pub fn with_capacity(dir: &Path, page_size: usize) -> Self {
         debug_assert!(
             page_size % BLOCK_SIZE_BYTES * REGION_SIZE_BLOCKS == 0,
             "Page size must be a multiple of block size"
@@ -143,13 +147,16 @@ impl Bitmask {
         }
     }
 
-    pub fn open(dir: PathBuf, page_size: usize) -> Self {
+    pub fn open(dir: &Path, page_size: usize) -> Option<Self> {
         debug_assert!(
             page_size % BLOCK_SIZE_BYTES == 0,
             "Page size must be a multiple of block size"
         );
 
         let path = Self::bitmask_path(dir);
+        if !path.exists() {
+            return None;
+        }
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
         let mmap_bitslice = MmapBitSlice::from(mmap, 0);
 
@@ -160,15 +167,15 @@ impl Bitmask {
             region_gaps.push(gaps);
         }
 
-        Self {
+        Some(Self {
             region_gaps,
             page_size,
             bitslice: mmap_bitslice,
             path,
-        }
+        })
     }
 
-    fn bitmask_path(dir: PathBuf) -> PathBuf {
+    fn bitmask_path(dir: &Path) -> PathBuf {
         dir.join(BITMASK_NAME)
     }
 
@@ -504,7 +511,7 @@ mod tests {
         let blocks_per_page = (page_size / BLOCK_SIZE_BYTES) as u32;
 
         let dir = tempfile::tempdir().unwrap();
-        let mut bitmask = super::Bitmask::with_capacity(dir.path().to_path_buf(), page_size);
+        let mut bitmask = super::Bitmask::with_capacity(dir.path(), page_size);
         bitmask.cover_new_page();
 
         assert_eq!(bitmask.bitslice.len() as u32, blocks_per_page * 2);
