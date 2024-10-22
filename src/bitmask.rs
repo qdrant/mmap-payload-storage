@@ -500,7 +500,7 @@ impl Bitmask {
 
 #[cfg(test)]
 mod tests {
-    use bitvec::{bits, order::Msb0, vec::BitVec};
+    use bitvec::{bits, vec::BitVec};
 
     use crate::{bitmask::REGION_SIZE_BLOCKS, payload_storage::BLOCK_SIZE_BYTES};
 
@@ -568,7 +568,7 @@ mod tests {
             1, 1, 1, 1, 1, 1
         ];
 
-        let mut bitvec = BitVec::<usize, Msb0>::new();
+        let mut bitvec = BitVec::<usize, Lsb0>::new();
         bitvec.extend_from_bitslice(bits);
 
         assert_eq!(bitvec.len(), 64);
@@ -576,9 +576,9 @@ mod tests {
         let raw = bitvec.as_raw_slice();
         assert_eq!(raw.len() as u32, 64 / usize::BITS);
 
-        assert_eq!(raw[0].leading_zeros(), 4);
-        assert_eq!(raw[0].trailing_zeros(), 0);
-        assert_eq!((raw[0] << 1).leading_zeros(), 3)
+        assert_eq!(raw[0].trailing_zeros(), 4);
+        assert_eq!(raw[0].leading_zeros(), 0);
+        assert_eq!((raw[0] >> 1).trailing_zeros(), 3)
     }
     // TODO: proptest!!! (for find_available blocks)
 }
