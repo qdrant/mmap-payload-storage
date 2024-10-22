@@ -19,13 +19,13 @@ pub fn bench_bitmask_ops(c: &mut Criterion) {
             Bitmask::calculate_gaps(black_box(bitslice))
         })
     });
-    
+
     c.bench_function("find_available_blocks", |b| {
         let mut rng = thread_rng();
         b.iter(|| {
             let bitslice = bitslice_iter.next().unwrap();
             let num_blocks = rng.gen_range(1..10);
-            Bitmask::find_available_blocks_in_slice(black_box(bitslice), num_blocks, |_| (0,0))
+            Bitmask::find_available_blocks_in_slice(black_box(bitslice), num_blocks, |_| (0, 0))
         })
     });
 }

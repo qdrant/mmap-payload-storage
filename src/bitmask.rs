@@ -267,8 +267,8 @@ impl Bitmask {
                 // cover the case of large number of blocks
                 if window_size >= 3 {
                     // check that the middle regions are empty
-                    for i in 1..window_size - 1 {
-                        if gaps[i].max as usize != REGION_SIZE_BLOCKS {
+                    for gap in gaps.iter().take(window_size - 1).skip(1) {
+                        if gap.max as usize != REGION_SIZE_BLOCKS {
                             return None;
                         }
                     }
@@ -361,7 +361,7 @@ impl Bitmask {
         let mut num_shifts = 0;
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
         const BITS_IN_CHUNK: u32 = usize::BITS;
-        for (chunk_idx, &mut mut chunk) in bitvec.as_raw_mut_slice().into_iter().enumerate() {
+        for (chunk_idx, &mut mut chunk) in bitvec.as_raw_mut_slice().iter_mut().enumerate() {
             while chunk != 0 {
                 let num_zeros = chunk.trailing_zeros();
                 current_size += num_zeros;
@@ -434,11 +434,7 @@ impl Bitmask {
     }
 
     pub fn calculate_gaps(region: &BitSlice) -> Gaps {
-        debug_assert_eq!(
-            region.len(),
-            REGION_SIZE_BLOCKS as usize,
-            "Unexpected region size"
-        );
+        debug_assert_eq!(region.len(), REGION_SIZE_BLOCKS, "Unexpected region size");
         // copy slice into bitvec
         // TODO: make shifting and counting leading/trailing depend on the native Lsb0 or Msb0
         // (or what we set the bitslice to be)
@@ -449,7 +445,7 @@ impl Bitmask {
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
         const BITS_IN_CHUNK: u16 = usize::BITS as u16;
         let mut num_shifts = 0;
-        for &mut mut chunk in bitvec.as_raw_mut_slice().into_iter() {
+        for &mut mut chunk in bitvec.as_raw_mut_slice().iter_mut() {
             while chunk != 0 {
                 // count consecutive zeros
                 let num_zeros = chunk.trailing_zeros() as u16;
