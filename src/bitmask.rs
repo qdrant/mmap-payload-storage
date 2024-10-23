@@ -3,10 +3,10 @@ mod bitmask_gaps;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use bitmask_gaps::{BitmaskGaps, RegionGaps};
 use bitvec::order::Lsb0;
 use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
-use bitmask_gaps::{RegionGaps, BitmaskGaps};
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::{BlockOffset, PageId};
@@ -79,7 +79,7 @@ impl Bitmask {
         // create regions gaps mmap
         let num_regions = mmap_bitslice.len() / REGION_SIZE_BLOCKS;
         let region_gaps = vec![RegionGaps::all_free(REGION_SIZE_BLOCKS as u16); num_regions];
-        
+
         let mmap_region_gaps = BitmaskGaps::create(dir.to_owned(), region_gaps.into_iter());
 
         Self {
@@ -103,7 +103,7 @@ impl Bitmask {
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
         let mmap_bitslice = MmapBitSlice::from(mmap, 0);
 
-        let bitmask_gaps= BitmaskGaps::open(dir.to_owned());
+        let bitmask_gaps = BitmaskGaps::open(dir.to_owned());
 
         Some(Self {
             regions_gaps: bitmask_gaps,
@@ -116,11 +116,11 @@ impl Bitmask {
     fn bitmask_path(dir: &Path) -> PathBuf {
         dir.join(BITMASK_NAME)
     }
-    
+
     pub fn flush(&self) -> Result<(), mmap_type::Error> {
         self.bitslice.flusher()()?;
         self.regions_gaps.flush()?;
-        
+
         Ok(())
     }
 

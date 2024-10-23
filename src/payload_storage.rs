@@ -234,7 +234,7 @@ impl PayloadStorage {
             let page = self
                 .pages
                 .get_mut(&page_id)
-                .expect(&format!("Page {page_id} not found"));
+                .unwrap_or_else(|| panic!("Page {page_id} not found"));
 
             let range = (payload_size - unwritten_tail)..;
             unwritten_tail = page.write_value(block_offset, &value[range]);
