@@ -1,12 +1,10 @@
-mod bitmask_gaps;
+mod gaps;
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use bitmask_gaps::{BitmaskGaps, RegionGaps};
-use bitvec::order::Lsb0;
+use gaps::{BitmaskGaps, RegionGaps};
 use bitvec::slice::BitSlice;
-use bitvec::vec::BitVec;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::{BlockOffset, PageId};
