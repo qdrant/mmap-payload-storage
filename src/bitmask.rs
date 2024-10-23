@@ -435,17 +435,24 @@ impl Bitmask {
 
     pub fn calculate_gaps(region: &BitSlice) -> Gaps {
         debug_assert_eq!(region.len(), REGION_SIZE_BLOCKS, "Unexpected region size");
-        // copy slice into bitvec
-        // TODO: make shifting and counting leading/trailing depend on the native Lsb0 or Msb0
-        // (or what we set the bitslice to be)
-        let mut bitvec = BitVec::<usize, Lsb0>::from_bitslice(region);
+        // Get raw memory region
+        let (head, raw_region, tail) = region
+            .domain()
+            .region()
+            .expect("Region covers more than one usize");
+        
+        // We expect the region to not use partial usizes
+        debug_assert!(head.is_none());
+        debug_assert!(tail.is_none());
+
         let mut max = 0;
         let mut current = 0;
 
-        // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
+        // Iterate over the integers that compose the bitslice. So that we can perform bitwise operations.
         const BITS_IN_CHUNK: u16 = usize::BITS as u16;
         let mut num_shifts = 0;
-        for &mut mut chunk in bitvec.as_raw_mut_slice().iter_mut() {
+        for chunk in raw_region {
+            let mut chunk = *chunk;
             while chunk != 0 {
                 // count consecutive zeros
                 let num_zeros = chunk.trailing_zeros() as u16;
