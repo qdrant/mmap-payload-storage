@@ -3,8 +3,9 @@ mod gaps;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use gaps::{BitmaskGaps, RegionGaps};
 use bitvec::slice::BitSlice;
+use gaps::{BitmaskGaps, RegionGaps};
+use itertools::Itertools;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::{BlockOffset, PageId};
