@@ -65,7 +65,7 @@ impl PayloadStorage {
             tracker: Tracker::new(&base_path, None),
             new_page_size: page_size,
             pages: HashMap::new(),
-            bitmask: Bitmask::with_capacity(&base_path, page_size),
+            bitmask: Bitmask::create(&base_path, page_size),
             next_page_id: 0,
             base_path,
         };
