@@ -12,7 +12,7 @@ use crate::payload_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::{BlockOffset, PageId};
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
-use crate::utils_copied::mmap_type::MmapBitSlice;
+use crate::utils_copied::mmap_type::{self, MmapBitSlice};
 
 const BITMASK_NAME: &str = "bitmask.dat";
 pub const REGION_SIZE_BLOCKS: usize = 8_192;
@@ -115,6 +115,13 @@ impl Bitmask {
 
     fn bitmask_path(dir: &Path) -> PathBuf {
         dir.join(BITMASK_NAME)
+    }
+    
+    pub fn flush(&self) -> Result<(), mmap_type::Error> {
+        self.bitslice.flusher()()?;
+        self.regions_gaps.flush()?;
+        
+        Ok(())
     }
 
     pub fn infer_num_pages(&self) -> usize {

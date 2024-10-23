@@ -5,7 +5,7 @@ use itertools::Itertools;
 use crate::utils_copied::{
     madvise::{Advice, AdviceSetting},
     mmap_ops::{create_and_ensure_length, open_write_mmap},
-    mmap_type::MmapSlice,
+    mmap_type::{self, MmapSlice},
 };
 
 use super::REGION_SIZE_BLOCKS;
@@ -101,6 +101,10 @@ impl BitmaskGaps {
         Self { path, mmap_slice }
     }
 
+    pub fn flush(&self) -> Result<(), mmap_type::Error> {
+        self.mmap_slice.flusher()()
+    }
+
     /// Extends the mmap file to fit the new regions
     pub fn extend(&mut self, mut iter: impl ExactSizeIterator<Item = RegionGaps>) {
         if iter.len() == 0 {
@@ -161,7 +165,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let dir_path = dir.path().to_path_buf();
 
-        let gaps = vec![RegionGaps::new(1, 2, 3), RegionGaps::new(4, 5, 6), RegionGaps::new(7, 8, 9)];
+        let gaps = vec![
+            RegionGaps::new(1, 2, 3),
+            RegionGaps::new(4, 5, 6),
+            RegionGaps::new(7, 8, 9),
+        ];
 
         // Create RegionGaps and write gaps
         {

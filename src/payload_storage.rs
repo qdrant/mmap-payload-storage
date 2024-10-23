@@ -2,6 +2,7 @@ use crate::bitmask::Bitmask;
 use crate::page::Page;
 use crate::payload::Payload;
 use crate::tracker::{BlockOffset, PageId, PointOffset, Tracker, ValuePointer};
+use crate::utils_copied::mmap_type;
 
 use lz4_flex::compress_prepend_size;
 use std::collections::HashMap;
@@ -336,12 +337,12 @@ impl PayloadStorage {
     }
 
     /// Flush all mmap pages to disk
-    pub fn flush(&self) -> std::io::Result<()> {
+    pub fn flush(&self) -> Result<(), mmap_type::Error> {
         self.tracker.flush()?;
         for page in self.pages.values() {
             page.flush()?;
         }
-        // TODO: flush the bitmask AND the gaps
+        self.bitmask.flush()?;
         Ok(())
     }
 
