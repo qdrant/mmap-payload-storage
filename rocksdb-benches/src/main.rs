@@ -15,7 +15,7 @@ fn default_opts(workload: &mut Workload) -> &mut Workload {
 }
 
 fn main() {
-    for n in [1, 4, 16].into_iter() {
+    for n in [1].into_iter() {
         println!("------------ {} thread(s) -------------", n);
         // Read heavy
         println!("**read_heavy** with prefill_fraction 0.95");

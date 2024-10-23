@@ -30,5 +30,9 @@ harness = false
 name = "real_data_bench"
 harness = false
 
+[[bench]]
+name = "bitmask_bench"
+harness = false
+
 [profile.bench]
 debug = true

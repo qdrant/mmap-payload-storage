@@ -1,7 +1,9 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use bitvec::order::Lsb0;
 use bitvec::slice::BitSlice;
+use bitvec::vec::BitVec;
 use itertools::Itertools;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
@@ -17,7 +19,7 @@ type RegionId = u32;
 
 /// Gaps of contiguous zeros in a bitmask region.
 #[derive(Debug, Clone)]
-struct Gaps {
+pub struct Gaps {
     max: u16,
     leading: u16,
     trailing: u16,
@@ -265,8 +267,8 @@ impl Bitmask {
                 // cover the case of large number of blocks
                 if window_size >= 3 {
                     // check that the middle regions are empty
-                    for i in 1..window_size - 1 {
-                        if gaps[i].max as usize != REGION_SIZE_BLOCKS {
+                    for gap in gaps.iter().take(window_size - 1).skip(1) {
+                        if gap.max as usize != REGION_SIZE_BLOCKS {
                             return None;
                         }
                     }
@@ -328,10 +330,10 @@ impl Bitmask {
         let regions_start_offset = region_id_range.start as usize * REGION_SIZE_BLOCKS;
         let regions_end_offset = region_id_range.end as usize * REGION_SIZE_BLOCKS;
 
-        let translate_to_answer = |current_start: u32| {
+        let translate_to_answer = |local_index: u32| {
             let page_size_in_blocks = self.page_size / BLOCK_SIZE_BYTES;
 
-            let global_cursor_offset = current_start as usize + regions_start_offset;
+            let global_cursor_offset = local_index as usize + regions_start_offset;
 
             // Calculate the page id and the block offset within the page
             let page_id = global_cursor_offset.div_euclid(page_size_in_blocks);
@@ -342,43 +344,59 @@ impl Bitmask {
 
         let regions_bitslice = &self.bitslice[regions_start_offset..regions_end_offset];
 
-        let mut bitvec = regions_bitslice.to_bitvec();
+        Self::find_available_blocks_in_slice(regions_bitslice, num_blocks, translate_to_answer)
+    }
+
+    pub fn find_available_blocks_in_slice<F>(
+        bitslice: &BitSlice,
+        num_blocks: u32,
+        translate_local_index: F,
+    ) -> Option<(PageId, BlockOffset)>
+    where
+        F: FnOnce(u32) -> (PageId, BlockOffset),
+    {
+        let mut bitvec = BitVec::<usize, Lsb0>::from_bitslice(bitslice);
         let mut current_size: u32 = 0;
         let mut current_start: u32 = 0;
-        let mut bit_idx = 0;
+        let mut num_shifts = 0;
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
         const BITS_IN_CHUNK: u32 = usize::BITS;
         for (chunk_idx, &mut mut chunk) in bitvec.as_raw_mut_slice().iter_mut().enumerate() {
-            if chunk == 0 {
-                current_size += BITS_IN_CHUNK;
-                // TODO: optimize the case of all ones too.
-            } else {
-                while bit_idx < BITS_IN_CHUNK {
-                    if (chunk & 1) == 0 {
-                        current_size += 1;
-                        if current_size >= num_blocks {
-                            // bingo - we found a free cell of num_blocks
-                            return Some(translate_to_answer(current_start));
-                        }
-                        chunk >>= 1;
-                        bit_idx += 1;
-                    } else {
-                        while chunk & 1 == 1 {
-                            // Skip over consecutive ones
-                            chunk >>= 1;
-                            bit_idx += 1;
-                        }
-                        current_size = 0;
-                        current_start = chunk_idx as u32 * BITS_IN_CHUNK + bit_idx;
-                    }
+            while chunk != 0 {
+                let num_zeros = chunk.trailing_zeros();
+                current_size += num_zeros;
+                if current_size >= num_blocks {
+                    // bingo - we found a free cell of num_blocks
+                    return Some(translate_local_index(current_start));
                 }
-                bit_idx = 0;
+
+                // shift by the number of zeros
+                chunk >>= num_zeros as usize;
+                num_shifts += num_zeros;
+
+                // skip consecutive ones
+                let num_ones = chunk.trailing_ones();
+                if num_ones < BITS_IN_CHUNK {
+                    chunk >>= num_ones;
+                } else {
+                    // all ones
+                    debug_assert!(chunk == !0);
+                    chunk = 0;
+                }
+                num_shifts += num_ones;
+
+                current_size = 0;
+                current_start = chunk_idx as u32 * BITS_IN_CHUNK + num_shifts;
             }
-            if current_size >= num_blocks {
-                // bingo - we found a free cell of num_blocks
-                return Some(translate_to_answer(current_start));
-            }
+            // no more ones in the chunk
+            current_size += BITS_IN_CHUNK - num_shifts;
+            num_shifts = 0;
         }
+        if current_size >= num_blocks {
+            // bingo - we found a free cell of num_blocks
+            return Some(translate_local_index(current_start));
+        }
+
         None
     }
 
@@ -415,68 +433,49 @@ impl Bitmask {
         }
     }
 
-    fn calculate_gaps(region: &BitSlice) -> Gaps {
+    pub fn calculate_gaps(region: &BitSlice) -> Gaps {
         debug_assert_eq!(region.len(), REGION_SIZE_BLOCKS, "Unexpected region size");
-        debug_assert!(!region.is_empty(), "region cannot be empty");
         // copy slice into bitvec
-        let mut bitvec = region.to_bitvec();
-
+        // TODO: make shifting and counting leading/trailing depend on the native Lsb0 or Msb0
+        // (or what we set the bitslice to be)
+        let mut bitvec = BitVec::<usize, Lsb0>::from_bitslice(region);
         let mut max = 0;
         let mut current = 0;
 
-        // Example, instead of using u64, let's use u8 for simplicity
-        //
-        // 0b00000000 -> 0
-        // 0b00000001 -> 1
-        //
-        // EXAMPLE: 11100000 00110001
-        // current: 0
-        // max: 3
-        //
-        // 00110001 AND 00000001 = 1
-        // shift right
-        // 00011000 AND 00000001 = 0
-        // increment current
-        //
-        // shift right
-        // increment current
-        //
-        // shift right
-        // increment current
-        //
-        // shift right
-        // 00000011 AND 00000001 = 1
-        // update max
-        // set current to zero
-        //
-        // shift right
-        // 00000001 AND 00000001 = 1
-        // set current to zero
-        //
-        // shift right
-        // chunk == 00000000
-        //
-        // ... TBC
-
         // Iterate over the integers that compose the bitvec. So that we can perform bitwise operations.
         const BITS_IN_CHUNK: u16 = usize::BITS as u16;
+        let mut num_shifts = 0;
         for &mut mut chunk in bitvec.as_raw_mut_slice().iter_mut() {
-            if chunk == 0 {
-                current += BITS_IN_CHUNK;
-            } else {
-                for _ in 0..BITS_IN_CHUNK {
-                    if (chunk & 1) == 0 {
-                        current += 1;
-                    } else {
-                        if current > max {
-                            max = current;
-                        }
-                        current = 0;
-                    }
-                    chunk >>= 1;
+            while chunk != 0 {
+                // count consecutive zeros
+                let num_zeros = chunk.trailing_zeros() as u16;
+                current += num_zeros;
+                if current > max {
+                    max = current;
                 }
+                current = 0;
+
+                // shift by the number of zeros
+                chunk >>= num_zeros as usize;
+                num_shifts += num_zeros;
+
+                // skip consecutive ones
+                let num_ones = chunk.trailing_ones() as u16;
+                if num_ones < BITS_IN_CHUNK {
+                    chunk >>= num_ones;
+                } else {
+                    // all ones
+                    debug_assert!(chunk == !0);
+                    chunk = 0;
+                }
+                num_shifts += num_ones;
             }
+
+            // no more ones in the chunk
+            current += BITS_IN_CHUNK - num_shifts;
+            num_shifts = 0;
         }
+
         if current > max {
             max = current;
         }
@@ -497,6 +496,8 @@ impl Bitmask {
 
 #[cfg(test)]
 mod tests {
+    use bitvec::{bits, vec::BitVec};
+
     use crate::{bitmask::REGION_SIZE_BLOCKS, payload_storage::BLOCK_SIZE_BYTES};
 
     #[test]
@@ -554,5 +555,26 @@ mod tests {
         assert_eq!(found_large, None);
     }
 
+    #[test]
+    fn test_raw_bitvec() {
+        use bitvec::prelude::Lsb0;
+        let bits = bits![
+            0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1
+        ];
+
+        let mut bitvec = BitVec::<usize, Lsb0>::new();
+        bitvec.extend_from_bitslice(bits);
+
+        assert_eq!(bitvec.len(), 64);
+
+        let raw = bitvec.as_raw_slice();
+        assert_eq!(raw.len() as u32, 64 / usize::BITS);
+
+        assert_eq!(raw[0].trailing_zeros(), 4);
+        assert_eq!(raw[0].leading_zeros(), 0);
+        assert_eq!((raw[0] >> 1).trailing_zeros(), 3)
+    }
     // TODO: proptest!!! (for find_available blocks)
 }
