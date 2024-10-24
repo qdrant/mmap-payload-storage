@@ -1,76 +1,22 @@
+mod gaps;
+
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use bitvec::order::Lsb0;
 use bitvec::slice::BitSlice;
-use bitvec::vec::BitVec;
+use gaps::{BitmaskGaps, RegionGaps};
 use itertools::Itertools;
 
 use crate::payload_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::{BlockOffset, PageId};
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
-use crate::utils_copied::mmap_type::MmapBitSlice;
+use crate::utils_copied::mmap_type::{self, MmapBitSlice};
 
 const BITMASK_NAME: &str = "bitmask.dat";
 pub const REGION_SIZE_BLOCKS: usize = 8_192;
 
 type RegionId = u32;
-
-/// Gaps of contiguous zeros in a bitmask region.
-#[derive(Debug, Clone)]
-pub struct Gaps {
-    max: u16,
-    leading: u16,
-    trailing: u16,
-}
-
-impl Gaps {
-    fn new(leading: u16, trailing: u16, max: u16) -> Self {
-        #[cfg(debug_assertions)]
-        {
-            let maximum_possible = REGION_SIZE_BLOCKS as u16;
-
-            assert!(max <= maximum_possible, "Unexpected max gap size");
-
-            assert!(
-                leading <= max,
-                "Invalid gaps: leading is {}, but max is {}",
-                leading,
-                max
-            );
-
-            assert!(
-                trailing <= max,
-                "Invalid gaps: trailing is {}, but max is {}",
-                trailing,
-                max
-            );
-
-            if leading == maximum_possible || trailing == maximum_possible {
-                assert_eq!(leading, trailing);
-            }
-        }
-
-        Self {
-            max,
-            leading,
-            trailing,
-        }
-    }
-
-    fn all_free(blocks: u16) -> Self {
-        Self {
-            max: blocks,
-            leading: blocks,
-            trailing: blocks,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.leading == REGION_SIZE_BLOCKS as u16
-    }
-}
 
 #[derive(Debug)]
 pub struct Bitmask {
@@ -78,7 +24,7 @@ pub struct Bitmask {
     page_size: usize,
 
     /// A summary of every 1KB (8_192 bits) of contiguous zeros in the bitmask, or less if it is the last region.
-    region_gaps: Vec<Gaps>,
+    regions_gaps: BitmaskGaps,
 
     /// The actual bitmask. Each bit represents a block. A 1 means the block is used, a 0 means it is free.
     bitslice: MmapBitSlice,
@@ -94,12 +40,7 @@ impl Bitmask {
 
     /// Calculate the amount of trailing free blocks in the bitmask.
     pub fn trailing_free_blocks(&self) -> u32 {
-        self.region_gaps
-            .iter()
-            .rev()
-            .take_while_inclusive(|gap| gap.trailing == REGION_SIZE_BLOCKS as u16)
-            .map(|gap| gap.trailing as u32)
-            .sum()
+        self.regions_gaps.trailing_free_blocks()
     }
 
     /// Calculate the amount of bytes needed for covering the blocks of a page.
@@ -118,14 +59,15 @@ impl Bitmask {
     }
 
     /// Create a bitmask for one page
-    pub fn with_capacity(dir: &Path, page_size: usize) -> Self {
+    pub fn create(dir: &Path, page_size: usize) -> Self {
         debug_assert!(
             page_size % BLOCK_SIZE_BYTES * REGION_SIZE_BLOCKS == 0,
-            "Page size must be a multiple of block size"
+            "Page size must be a multiple of block size * region size"
         );
 
         let length = Self::length_for_page(page_size);
 
+        // create bitmask mmap
         let path = Self::bitmask_path(dir);
         create_and_ensure_length(&path, length).unwrap();
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
@@ -133,17 +75,15 @@ impl Bitmask {
 
         assert_eq!(mmap_bitslice.len(), length * 8, "Bitmask length mismatch");
 
-        let regions = mmap_bitslice.len().div_euclid(REGION_SIZE_BLOCKS);
-        let mut region_gaps = vec![Gaps::all_free(REGION_SIZE_BLOCKS as u16); regions];
+        // create regions gaps mmap
+        let num_regions = mmap_bitslice.len() / REGION_SIZE_BLOCKS;
+        let region_gaps = vec![RegionGaps::all_free(REGION_SIZE_BLOCKS as u16); num_regions];
 
-        let last_region_blocks = mmap_bitslice.len().rem_euclid(REGION_SIZE_BLOCKS);
-        if last_region_blocks > 0 {
-            region_gaps.push(Gaps::all_free(last_region_blocks as u16));
-        }
+        let mmap_region_gaps = BitmaskGaps::create(dir.to_owned(), region_gaps.into_iter());
 
         Self {
             page_size,
-            region_gaps,
+            regions_gaps: mmap_region_gaps,
             bitslice: mmap_bitslice,
             path,
         }
@@ -162,15 +102,10 @@ impl Bitmask {
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
         let mmap_bitslice = MmapBitSlice::from(mmap, 0);
 
-        // TODO: persist?
-        let mut region_gaps = Vec::new();
-        for region_blocks in mmap_bitslice.chunks(REGION_SIZE_BLOCKS) {
-            let gaps = Self::calculate_gaps(region_blocks);
-            region_gaps.push(gaps);
-        }
+        let bitmask_gaps = BitmaskGaps::open(dir.to_owned());
 
         Some(Self {
-            region_gaps,
+            regions_gaps: bitmask_gaps,
             page_size,
             bitslice: mmap_bitslice,
             path,
@@ -179,6 +114,13 @@ impl Bitmask {
 
     fn bitmask_path(dir: &Path) -> PathBuf {
         dir.join(BITMASK_NAME)
+    }
+
+    pub fn flush(&self) -> Result<(), mmap_type::Error> {
+        self.bitslice.flusher()()?;
+        self.regions_gaps.flush()?;
+
+        Ok(())
     }
 
     pub fn infer_num_pages(&self) -> usize {
@@ -203,21 +145,21 @@ impl Bitmask {
         self.bitslice = MmapBitSlice::from(mmap, 0);
 
         // extend the region gaps
-        let current_total_regions = self.region_gaps.len();
+        let current_total_regions = self.regions_gaps.len();
         let expected_total_full_regions = self.bitslice.len().div_euclid(REGION_SIZE_BLOCKS);
         debug_assert!(
             self.bitslice.len() % REGION_SIZE_BLOCKS == 0,
             "Bitmask length must be a multiple of region size"
         );
         let new_regions = expected_total_full_regions.saturating_sub(current_total_regions);
-        let new_gaps = vec![Gaps::all_free(REGION_SIZE_BLOCKS as u16); new_regions];
-        self.region_gaps.extend(new_gaps);
+        let new_gaps = vec![RegionGaps::all_free(REGION_SIZE_BLOCKS as u16); new_regions];
+        self.regions_gaps.extend(new_gaps.into_iter());
 
         // update the previous last region gaps
         self.update_region_gaps(previous_bitslice_len - 1..previous_bitslice_len + 2);
 
         assert_eq!(
-            self.region_gaps.len() * REGION_SIZE_BLOCKS,
+            self.regions_gaps.len() * REGION_SIZE_BLOCKS,
             self.bitslice.len(),
             "Bitmask length mismatch",
         );
@@ -252,15 +194,15 @@ impl Bitmask {
 
         let window_size = regions_needed + 1;
 
-        if self.region_gaps.len() == 1 {
-            if self.region_gaps[0].max as usize >= num_blocks as usize {
+        if self.regions_gaps.len() == 1 {
+            if self.regions_gaps.get(0).max as usize >= num_blocks as usize {
                 return Some(0..1);
             } else {
                 return None;
             }
         }
 
-        self.region_gaps[..]
+        self.regions_gaps.as_slice()[..]
             .windows(window_size)
             .enumerate()
             .find_map(|(start_region_id, gaps)| {
@@ -439,11 +381,11 @@ impl Bitmask {
 
             let gaps = Self::calculate_gaps(bitslice);
 
-            self.region_gaps[region_id] = gaps;
+            *self.regions_gaps.get_mut(region_id) = gaps;
         }
     }
 
-    pub fn calculate_gaps(region: &BitSlice) -> Gaps {
+    pub fn calculate_gaps(region: &BitSlice) -> RegionGaps {
         debug_assert_eq!(region.len(), REGION_SIZE_BLOCKS, "Unexpected region size");
         // Get raw memory region
         let (head, raw_region, tail) = region
@@ -515,7 +457,7 @@ impl Bitmask {
                 .sum::<u32>() as u16;
         }
 
-        Gaps::new(leading, trailing, max)
+        RegionGaps::new(leading, trailing, max)
     }
 }
 
@@ -537,7 +479,7 @@ mod tests {
         let blocks_per_page = (page_size / BLOCK_SIZE_BYTES) as u32;
 
         let dir = tempfile::tempdir().unwrap();
-        let mut bitmask = super::Bitmask::with_capacity(dir.path(), page_size);
+        let mut bitmask = super::Bitmask::create(dir.path(), page_size);
         bitmask.cover_new_page();
 
         assert_eq!(bitmask.bitslice.len() as u32, blocks_per_page * 2);

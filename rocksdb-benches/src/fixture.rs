@@ -22,7 +22,7 @@ pub struct StorageProxy<S> {
     max_internal_id: u32,
     payload_picker: PayloadPicker,
 
-    /// Flush every amount of writes
+    /// Amount of writes without a flush.
     write_count: u32,
 }
 
