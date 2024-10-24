@@ -68,7 +68,7 @@ impl RegionGaps {
 /// An overview of contiguous free blocks covered by the bitmask.
 #[derive(Debug)]
 pub(super) struct BitmaskGaps {
-    path: PathBuf,
+    pub path: PathBuf,
     mmap_slice: MmapSlice<RegionGaps>,
 }
 

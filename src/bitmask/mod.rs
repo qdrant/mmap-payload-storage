@@ -35,7 +35,7 @@ pub struct Bitmask {
 
 impl Bitmask {
     pub fn files(&self) -> Vec<PathBuf> {
-        vec![self.path.clone()]
+        vec![self.path.clone(), self.regions_gaps.path.clone()]
     }
 
     /// Calculate the amount of trailing free blocks in the bitmask.
