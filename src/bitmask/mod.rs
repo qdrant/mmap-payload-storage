@@ -180,6 +180,7 @@ impl Bitmask {
     }
 
     /// The amount of blocks that are available for reuse in the page.
+    #[allow(dead_code)]
     pub(crate) fn fragmented_blocks_for_page(&self, page_id: PageId) -> usize {
         let range_of_page = self.range_of_page(page_id);
         let bitslice = &self.bitslice[range_of_page];
@@ -196,11 +197,11 @@ impl Bitmask {
         let window_size = regions_needed + 1;
 
         if self.regions_gaps.len() == 1 {
-            if self.regions_gaps.get(0).max as usize >= num_blocks as usize {
-                return Some(0..1);
+            return if self.regions_gaps.get(0).max as usize >= num_blocks as usize {
+                Some(0..1)
             } else {
-                return None;
-            }
+                None
+            };
         }
 
         self.regions_gaps.as_slice()[..]
@@ -220,14 +221,14 @@ impl Bitmask {
                     let merged_gap =
                         (trailing + leading) as usize + (window_size - 2) * REGION_SIZE_BLOCKS;
 
-                    if merged_gap as u32 >= num_blocks {
-                        return Some(
+                    return if merged_gap as u32 >= num_blocks {
+                        Some(
                             start_region_id as RegionId
                                 ..(start_region_id + window_size) as RegionId,
-                        );
+                        )
                     } else {
-                        return None;
-                    }
+                        None
+                    };
                 }
 
                 // windows of 2
@@ -239,15 +240,11 @@ impl Bitmask {
                 if left.max as u32 >= num_blocks {
                     // if both gaps are large enough, choose the smaller one
                     if right.max as u32 >= num_blocks {
-                        if left.max <= right.max {
-                            return Some(
-                                start_region_id as RegionId..start_region_id as RegionId + 1,
-                            );
+                        return if left.max <= right.max {
+                            Some(start_region_id as RegionId..start_region_id as RegionId + 1)
                         } else {
-                            return Some(
-                                start_region_id as RegionId + 1..start_region_id as RegionId + 2,
-                            );
-                        }
+                            Some(start_region_id as RegionId + 1..start_region_id as RegionId + 2)
+                        };
                     }
                     return Some(start_region_id as RegionId..start_region_id as RegionId + 1);
                 }

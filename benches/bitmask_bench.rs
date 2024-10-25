@@ -8,10 +8,10 @@ pub fn bench_bitmask_ops(c: &mut Criterion) {
     let rng = thread_rng();
     let random_bitvec = rng
         .sample_iter::<bool, _>(distr)
-        .take(1000 * REGION_SIZE_BLOCKS as usize)
+        .take(1000 * REGION_SIZE_BLOCKS)
         .collect::<BitVec>();
 
-    let mut bitslice_iter = random_bitvec.windows(REGION_SIZE_BLOCKS as usize).cycle();
+    let mut bitslice_iter = random_bitvec.windows(REGION_SIZE_BLOCKS).cycle();
 
     c.bench_function("calculate_gaps", |b| {
         b.iter(|| {

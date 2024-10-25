@@ -25,3 +25,5 @@ jobs:
         run: cargo build
       - name: Run tests
         run: cargo nextest run
+      - name: Check cargo clippy warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
