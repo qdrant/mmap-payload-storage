@@ -188,85 +188,8 @@ impl Bitmask {
         bitslice.count_zeros() - bitslice.trailing_zeros()
     }
 
-    /// Find a gap in the bitmask that is large enough to fit `num_blocks` blocks.
-    /// Returns the region id of the gap.
-    /// In case of boundary gaps, returns the region id of the left gap.
-    fn find_fitting_gap(&self, num_blocks: u32) -> Option<Range<RegionId>> {
-        let regions_needed = num_blocks.div_ceil(REGION_SIZE_BLOCKS as u32) as usize;
-
-        let window_size = regions_needed + 1;
-
-        if self.regions_gaps.len() == 1 {
-            return if self.regions_gaps.get(0).max as usize >= num_blocks as usize {
-                Some(0..1)
-            } else {
-                None
-            };
-        }
-
-        self.regions_gaps.as_slice()[..]
-            .windows(window_size)
-            .enumerate()
-            .find_map(|(start_region_id, gaps)| {
-                // cover the case of large number of blocks
-                if window_size >= 3 {
-                    // check that the middle regions are empty
-                    for gap in gaps.iter().take(window_size - 1).skip(1) {
-                        if gap.max as usize != REGION_SIZE_BLOCKS {
-                            return None;
-                        }
-                    }
-                    let trailing = gaps[0].trailing;
-                    let leading = gaps[window_size - 1].leading;
-                    let merged_gap =
-                        (trailing + leading) as usize + (window_size - 2) * REGION_SIZE_BLOCKS;
-
-                    return if merged_gap as u32 >= num_blocks {
-                        Some(
-                            start_region_id as RegionId
-                                ..(start_region_id + window_size) as RegionId,
-                        )
-                    } else {
-                        None
-                    };
-                }
-
-                // windows of 2
-                debug_assert!(window_size == 2, "Unexpected window size");
-                let left = &gaps[0];
-                let right = &gaps[1];
-
-                // check it fits in the left region
-                if left.max as u32 >= num_blocks {
-                    // if both gaps are large enough, choose the smaller one
-                    if right.max as u32 >= num_blocks {
-                        return if left.max <= right.max {
-                            Some(start_region_id as RegionId..start_region_id as RegionId + 1)
-                        } else {
-                            Some(start_region_id as RegionId + 1..start_region_id as RegionId + 2)
-                        };
-                    }
-                    return Some(start_region_id as RegionId..start_region_id as RegionId + 1);
-                }
-
-                // check it fits in the right region
-                if right.max as u32 >= num_blocks {
-                    return Some(start_region_id as RegionId + 1..start_region_id as RegionId + 2);
-                }
-
-                // Otherwise, check if the gap in between them is large enough
-                let in_between = left.trailing + right.leading;
-
-                if in_between as u32 >= num_blocks {
-                    Some(start_region_id as RegionId..start_region_id as RegionId + 2)
-                } else {
-                    None
-                }
-            })
-    }
-
     pub(crate) fn find_available_blocks(&self, num_blocks: u32) -> Option<(PageId, BlockOffset)> {
-        let region_id_range = self.find_fitting_gap(num_blocks)?;
+        let region_id_range = self.regions_gaps.find_fitting_gap(num_blocks)?;
         let regions_start_offset = region_id_range.start as usize * REGION_SIZE_BLOCKS;
         let regions_end_offset = region_id_range.end as usize * REGION_SIZE_BLOCKS;
 
@@ -461,7 +384,11 @@ impl Bitmask {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
     use bitvec::{bits, vec::BitVec};
+    use proptest::prelude::*;
+    use rand::thread_rng;
 
     use crate::{bitmask::REGION_SIZE_BLOCKS, payload_storage::BLOCK_SIZE_BYTES};
 
@@ -541,5 +468,74 @@ mod tests {
         assert_eq!(raw[0].leading_zeros(), 0);
         assert_eq!((raw[0] >> 1).trailing_zeros(), 3)
     }
-    // TODO: proptest!!! (for find_available blocks)
+
+    prop_compose! {
+        /// Creates a fixture bitvec which has gaps of a specific size
+        fn regions_bitvec_with_max_gap(max_gap_size: usize) (len in 0..REGION_SIZE_BLOCKS*4) -> (BitVec, usize) {
+            assert!(max_gap_size > 0);
+            let len = len.next_multiple_of(REGION_SIZE_BLOCKS);
+        
+            let mut bitvec = BitVec::new();
+            bitvec.resize(len as usize, true);
+            
+            let mut rng = thread_rng();
+            
+            let mut i = 0;
+            let mut max_gap = 0;
+            while i < len {
+                let run = rng.gen_range(1..max_gap_size).min(len - i);
+                let skip = rng.gen_range(1..max_gap_size);
+                
+                for j in 0..run {
+                    bitvec.set(i as usize + j as usize, false);
+                }
+                
+                if run > max_gap {
+                    max_gap = run;
+                }
+                
+                i += run + skip;
+            }
+            
+            (bitvec, max_gap)
+        }
+    }
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+        
+        #[test]
+        fn test_find_available_blocks_properties((bitvec, max_gap) in regions_bitvec_with_max_gap(120)) {
+            let bitslice = bitvec.as_bitslice();
+
+            // Helper to check if a range is all zeros
+            let is_free_range = |start: usize, len: usize| {
+                let range = start..(start + len);
+                bitslice.get(range)
+                    .map(|slice| slice.not_any())
+                    .unwrap_or(false)
+            };
+
+            // For different requested block sizes
+            for req_blocks in 1..=max_gap {
+                if let Some((_, block_offset)) = super::Bitmask::find_available_blocks_in_slice(
+                    bitslice,
+                    req_blocks as u32,
+                    |idx| (0, idx),
+                ) {
+                    // The found position should have enough free blocks
+                    prop_assert!(is_free_range(block_offset as usize, req_blocks));
+                } else {
+                    prop_assert!(false, "Should've found a free range")
+                }
+            }
+            
+            // For a block size that doesn't fit
+            let req_blocks = max_gap + 1;
+            prop_assert!(super::Bitmask::find_available_blocks_in_slice(
+                bitslice,
+                req_blocks as u32,
+                |idx| (0, idx),
+            ).is_none());
+        }
+    }
 }

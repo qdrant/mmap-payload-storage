@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{ops::Range, path::PathBuf};
 
 use itertools::Itertools;
 
@@ -8,7 +8,7 @@ use crate::utils_copied::{
     mmap_type::{self, MmapSlice},
 };
 
-use super::REGION_SIZE_BLOCKS;
+use super::{RegionId, REGION_SIZE_BLOCKS};
 
 /// Gaps of contiguous zeros in a bitmask region.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -136,8 +136,9 @@ impl BitmaskGaps {
         self.mmap_slice.len()
     }
 
-    pub fn get(&self, idx: usize) -> &RegionGaps {
-        &self.mmap_slice[idx]
+
+    pub fn get(&self, idx: usize) -> Option<&RegionGaps> {
+        self.mmap_slice.get(idx)
     }
 
     pub fn get_mut(&mut self, idx: usize) -> &mut RegionGaps {
@@ -147,12 +148,194 @@ impl BitmaskGaps {
     pub fn as_slice(&self) -> &[RegionGaps] {
         &self.mmap_slice
     }
+
+    /// Find a gap in the bitmask that is large enough to fit `num_blocks` blocks.
+    /// Returns the region id of the gap.
+    /// In case of boundary gaps, returns the region id of the left gap.
+    pub fn find_fitting_gap(&self, num_blocks: u32) -> Option<Range<RegionId>> {
+        let regions_needed = num_blocks.div_ceil(REGION_SIZE_BLOCKS as u32) as usize;
+
+        let window_size = regions_needed + 1;
+
+        if self.mmap_slice.len() == 1 {
+            return if self.get(0).unwrap().max as usize >= num_blocks as usize {
+                Some(0..1)
+            } else {
+                None
+            };
+        }
+
+        self.as_slice()
+            .windows(window_size)
+            .enumerate()
+            .find_map(|(start_region_id, gaps)| {
+                // cover the case of large number of blocks
+                if window_size >= 3 {
+                    // check that the middle regions are empty
+                    for gap in gaps.iter().take(window_size - 1).skip(1) {
+                        if gap.max as usize != REGION_SIZE_BLOCKS {
+                            return None;
+                        }
+                    }
+                    let trailing = gaps[0].trailing;
+                    let leading = gaps[window_size - 1].leading;
+                    let merged_gap =
+                        (trailing + leading) as usize + (window_size - 2) * REGION_SIZE_BLOCKS;
+
+                    return if merged_gap as u32 >= num_blocks {
+                        Some(
+                            start_region_id as RegionId
+                                ..(start_region_id + window_size) as RegionId,
+                        )
+                    } else {
+                        None
+                    };
+                }
+
+                // windows of 2
+                debug_assert!(window_size == 2, "Unexpected window size");
+                let left = &gaps[0];
+                let right = &gaps[1];
+
+                // check it fits in the left region
+                if left.max as u32 >= num_blocks {
+                    // if both gaps are large enough, choose the smaller one
+                    if right.max as u32 >= num_blocks {
+                        return if left.max <= right.max {
+                            Some(start_region_id as RegionId..start_region_id as RegionId + 1)
+                        } else {
+                            Some(start_region_id as RegionId + 1..start_region_id as RegionId + 2)
+                        };
+                    }
+                    return Some(start_region_id as RegionId..start_region_id as RegionId + 1);
+                }
+
+                // check it fits in the right region
+                if right.max as u32 >= num_blocks {
+                    return Some(start_region_id as RegionId + 1..start_region_id as RegionId + 2);
+                }
+
+                // Otherwise, check if the gap in between them is large enough
+                let in_between = left.trailing + right.leading;
+
+                if in_between as u32 >= num_blocks {
+                    Some(start_region_id as RegionId..start_region_id as RegionId + 2)
+                } else {
+                    None
+                }
+            })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use proptest::prelude::*;
+    use tempfile::tempdir;
+
+    prop_compose! {
+        fn arbitrary_region_gaps()(
+            leading in 0..=REGION_SIZE_BLOCKS as u16,
+            trailing in 0..=REGION_SIZE_BLOCKS as u16,
+            max in 0..=REGION_SIZE_BLOCKS as u16,
+        ) -> RegionGaps {
+            if leading + trailing >= REGION_SIZE_BLOCKS as u16 {
+                return RegionGaps::all_free(REGION_SIZE_BLOCKS as u16);
+            }
+            
+            let in_between = REGION_SIZE_BLOCKS as u16 - leading - trailing;
+            
+            let max = max.min(in_between.saturating_sub(2)).max(leading).max(trailing);
+
+            RegionGaps::new(leading, trailing, max)
+        }
+    }
+
+    impl Arbitrary for RegionGaps {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+            arbitrary_region_gaps().boxed()
+        }
+    }
+
+    fn regions_gaps_to_bitvec(gaps: &[RegionGaps]) -> bitvec::vec::BitVec {
+        let total_bits = gaps.len() * REGION_SIZE_BLOCKS;
+        let mut bv = bitvec::vec::BitVec::repeat(true, total_bits);
+
+        for (region_idx, gap) in gaps.iter().enumerate() {
+            let region_start = region_idx * REGION_SIZE_BLOCKS;
+
+            // Handle leading zeros
+            if gap.leading > 0 {
+                for i in 0..gap.leading as usize {
+                    bv.set(region_start + i, false);
+                }
+            }
+
+            // Handle trailing zeros
+            if gap.trailing > 0 {
+                let trailing_start = region_start + REGION_SIZE_BLOCKS - gap.trailing as usize;
+                for i in 0..gap.trailing as usize {
+                    bv.set(trailing_start + i, false);
+                }
+            }
+
+            // Handle max zeros if bigger than both leading and trailing
+            if gap.max > gap.leading && gap.max > gap.trailing {
+                // start after leading, but leave one bit in between to create a separate gap
+                let zeros_start = region_start + gap.leading as usize + 1;
+                let zeros_end = zeros_start + gap.max as usize;
+
+                // Put remaining zeros in middle
+                for i in zeros_start..zeros_end {
+                    bv.set(i, false);
+                }
+            }
+        }
+
+        bv
+    }
+
+    proptest! {
+        #[test]
+        fn test_find_fitting_gap(
+            gaps in prop::collection::vec(any::<RegionGaps>(), 1..100),
+            num_blocks in 1..=(REGION_SIZE_BLOCKS as u32 * 3)
+        ) {
+            let temp_dir = tempdir().unwrap();
+            let bitmask_gaps = BitmaskGaps::create(temp_dir.path().to_path_buf(), gaps.clone().into_iter());
+
+            let bitvec = regions_gaps_to_bitvec(&gaps);
+
+            if let Some(range) = bitmask_gaps.find_fitting_gap(num_blocks) {
+                // Range should be within bounds
+                prop_assert!(range.start <= bitmask_gaps.len() as u32);
+                prop_assert!(range.end <= bitmask_gaps.len() as u32);
+                prop_assert!(range.start <= range.end);
+
+                // check that range is as constrained as possible
+                let total_regions = range.end - range.start;
+                let max_needed_regions = num_blocks.div_ceil(REGION_SIZE_BLOCKS as u32) + 1;
+                prop_assert!(total_regions <= max_needed_regions);
+
+                // Range should actually have a gap with enough blocks
+                let regions_start = range.start as usize * REGION_SIZE_BLOCKS;
+                let regions_end = range.end as usize * REGION_SIZE_BLOCKS;
+                let max_gap = bitvec[regions_start..regions_end].iter().chunk_by(|b| **b).into_iter()
+                    .filter(|(used, _group)| !*used)
+                    .map(|(_, group)| group.count() as u32)
+                    .max()
+                    .unwrap_or(0);
+
+                // Verify the gap is large enough
+                prop_assert!(max_gap >= num_blocks, "max_gap: {}, num_blocks: {}", max_gap, num_blocks);
+            }
+        }
+    }
+    
     #[test]
     fn test_region_gaps_persistence() {
         use std::fs;
@@ -172,7 +355,7 @@ mod tests {
             let region_gaps = BitmaskGaps::create(dir_path.clone(), gaps.clone().into_iter());
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
-                assert_eq!(region_gaps.get(i), gap);
+                assert_eq!(region_gaps.get(i).unwrap(), gap);
             }
         }
 
@@ -181,7 +364,7 @@ mod tests {
             let region_gaps = BitmaskGaps::open(dir_path.clone());
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
-                assert_eq!(region_gaps.get(i), gap);
+                assert_eq!(region_gaps.get(i).unwrap(), gap);
             }
         }
 
@@ -193,7 +376,7 @@ mod tests {
             region_gaps.extend(more_gaps.clone().into_iter());
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
-                assert_eq!(region_gaps.get(i), gap);
+                assert_eq!(region_gaps.get(i).unwrap(), gap);
             }
         }
 
@@ -202,7 +385,7 @@ mod tests {
             let region_gaps = BitmaskGaps::open(dir_path.clone());
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
-                assert_eq!(region_gaps.get(i), gap);
+                assert_eq!(region_gaps.get(i).unwrap(), gap);
             }
         }
 

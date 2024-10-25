@@ -20,7 +20,7 @@ pub fn bench_bitmask_ops(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("find_available_blocks", |b| {
+    c.bench_function("find_available_blocks_in_slice", |b| {
         let mut rng = thread_rng();
         b.iter(|| {
             let bitslice = bitslice_iter.next().unwrap();
