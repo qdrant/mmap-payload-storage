@@ -273,11 +273,7 @@ impl PayloadStorage {
         let old_pointer_opt = self.get_pointer(point_offset);
         self.tracker.set(
             point_offset,
-            ValuePointer {
-                page_id: start_page_id,
-                block_offset,
-                length: payload_size as u32,
-            },
+            ValuePointer::new(start_page_id, block_offset, payload_size as u32),
         );
 
         // Check if it is a payload update.
@@ -290,10 +286,6 @@ impl PayloadStorage {
                 false,
             );
         }
-
-        // TODO:
-        // - recompute bitmask gaps
-
         // return whether it was an update or not
         old_pointer_opt.is_some()
     }
@@ -324,7 +316,8 @@ impl PayloadStorage {
             false,
         );
 
-        // TODO: recompute bitmask gaps
+        // TODO delete pages when empty - keep at most one empty page at the end
+
         Some(payload)
     }
 

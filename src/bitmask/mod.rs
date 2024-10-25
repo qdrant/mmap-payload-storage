@@ -173,6 +173,7 @@ impl Bitmask {
     }
 
     /// The amount of blocks that have never been used in the page.
+    #[cfg(test)]
     pub(crate) fn free_blocks_for_page(&self, page_id: PageId) -> usize {
         let range_of_page = self.range_of_page(page_id);
         self.bitslice[range_of_page].trailing_zeros()

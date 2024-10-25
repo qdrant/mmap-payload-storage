@@ -12,17 +12,6 @@ pub(crate) struct Page {
 }
 
 impl Page {
-    /// Cell size required to store a value of the given size.
-    pub fn cell_size_for_value(value_size: usize) -> usize {
-        // The value size should be at least the minimum cell size, and always be a multiple of it.
-        value_size.next_multiple_of(BLOCK_SIZE_BYTES)
-    }
-
-    /// Minimum free space required for a value of the given size.
-    pub fn required_space_for_new_value(value_size: usize) -> usize {
-        Self::cell_size_for_value(value_size)
-    }
-
     /// Flushes outstanding memory map modifications to disk.
     pub(crate) fn flush(&self) -> std::io::Result<()> {
         self.mmap.flush()

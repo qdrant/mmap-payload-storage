@@ -91,10 +91,12 @@ impl Tracker {
     }
 
     /// Return the size of the underlying mmaped file
+    #[cfg(test)]
     pub fn mmap_file_size(&self) -> usize {
         self.mmap.len()
     }
 
+    #[cfg(test)]
     pub fn header_count(&self) -> u32 {
         self.header.max_point_offset
     }

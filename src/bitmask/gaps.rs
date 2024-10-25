@@ -59,10 +59,6 @@ impl RegionGaps {
             trailing: blocks,
         }
     }
-
-    fn is_empty(&self) -> bool {
-        self.leading == REGION_SIZE_BLOCKS as u16
-    }
 }
 
 /// An overview of contiguous free blocks covered by the bitmask.
