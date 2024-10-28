@@ -136,7 +136,6 @@ impl BitmaskGaps {
         self.mmap_slice.len()
     }
 
-
     pub fn get(&self, idx: usize) -> Option<&RegionGaps> {
         self.mmap_slice.get(idx)
     }
@@ -243,9 +242,9 @@ mod tests {
             if leading + trailing >= REGION_SIZE_BLOCKS as u16 {
                 return RegionGaps::all_free(REGION_SIZE_BLOCKS as u16);
             }
-            
+
             let in_between = REGION_SIZE_BLOCKS as u16 - leading - trailing;
-            
+
             let max = max.min(in_between.saturating_sub(2)).max(leading).max(trailing);
 
             RegionGaps::new(leading, trailing, max)
@@ -335,7 +334,7 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_region_gaps_persistence() {
         use std::fs;

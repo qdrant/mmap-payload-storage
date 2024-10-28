@@ -14,12 +14,16 @@ pub const BLOCK_SIZE_BYTES: usize = 128;
 
 #[derive(Debug)]
 pub struct PayloadStorage {
+    /// Holds mapping from `PointOffset` -> (page id; page offset)
+    /// Stored in a separate file
     tracker: Tracker,
-    pub(super) new_page_size: usize, // page size in bytes when creating new pages
+    pub(super) new_page_size: usize, // page size in bytes when creating new pages, normally 32MB
     // TODO: turn hashmap into vec, all page ids are sequential now
     pub(super) pages: HashMap<u32, Page>, // page_id -> mmap page
     bitmask: Bitmask,
+    /// Same as `pages.len()`, but used to create new pages
     next_page_id: u32,
+    /// Path of the directory where the storage files are stored
     base_path: PathBuf,
 }
 

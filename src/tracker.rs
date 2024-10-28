@@ -9,6 +9,8 @@ pub type PointOffset = u32;
 pub type BlockOffset = u32;
 pub type PageId = u32;
 
+const TRACKER_MEM_ADVICE: Advice = Advice::Random;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ValuePointer {
     /// Which page the value is stored in
@@ -62,7 +64,7 @@ impl Tracker {
         let size = size_hint.unwrap_or(Self::DEFAULT_SIZE);
         assert!(size > size_of::<TrackerHeader>(), "Size hint is too small");
         create_and_ensure_length(&path, size).expect("Failed to create page tracker file");
-        let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false)
+        let mmap = open_write_mmap(&path, AdviceSetting::from(TRACKER_MEM_ADVICE), false)
             .expect("Failed to open page tracker mmap");
         let header = TrackerHeader::default();
         let mut page_tracker = Self { path, header, mmap };
@@ -77,7 +79,7 @@ impl Tracker {
         if !path.exists() {
             return None;
         }
-        let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
+        let mmap = open_write_mmap(&path, AdviceSetting::from(TRACKER_MEM_ADVICE), false).unwrap();
         let header: &TrackerHeader = transmute_from_u8(&mmap[0..size_of::<TrackerHeader>()]);
         Some(Self {
             path,
@@ -122,8 +124,8 @@ impl Tracker {
             // account for missing size + extra to avoid resizing too often
             let new_size = self.mmap.len() + missing_space + Self::DEFAULT_SIZE;
             create_and_ensure_length(&self.path, new_size).unwrap();
-            self.mmap =
-                open_write_mmap(&self.path, AdviceSetting::from(Advice::Normal), false).unwrap();
+            self.mmap = open_write_mmap(&self.path, AdviceSetting::from(TRACKER_MEM_ADVICE), false)
+                .unwrap();
         }
         self.mmap[start_offset..end_offset].copy_from_slice(transmute_to_u8(&pointer));
     }
