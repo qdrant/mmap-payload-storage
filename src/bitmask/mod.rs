@@ -388,7 +388,6 @@ impl Bitmask {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
 
     use bitvec::{bits, vec::BitVec};
     use proptest::prelude::*;
@@ -480,7 +479,7 @@ mod tests {
             let len = len.next_multiple_of(REGION_SIZE_BLOCKS);
 
             let mut bitvec = BitVec::new();
-            bitvec.resize(len as usize, true);
+            bitvec.resize(len, true);
 
             let mut rng = thread_rng();
 
@@ -491,7 +490,7 @@ mod tests {
                 let skip = rng.gen_range(1..max_gap_size);
 
                 for j in 0..run {
-                    bitvec.set(i as usize + j as usize, false);
+                    bitvec.set(i + j, false);
                 }
 
                 if run > max_gap {

@@ -320,8 +320,6 @@ impl PayloadStorage {
             false,
         );
 
-        // TODO delete pages when empty - keep at most one empty page at the end
-
         Some(payload)
     }
 

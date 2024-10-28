@@ -40,9 +40,12 @@ struct TrackerHeader {
 
 #[derive(Debug)]
 pub struct Tracker {
-    path: PathBuf,         // path to the file
-    header: TrackerHeader, // header of the file
-    mmap: MmapMut,         // mmap of the file
+    /// Path to the file
+    path: PathBuf,         
+    /// Header of the file
+    header: TrackerHeader, 
+    /// Mmap of the file
+    mmap: MmapMut,         
 }
 
 impl Tracker {
