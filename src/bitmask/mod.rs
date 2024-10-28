@@ -33,6 +33,11 @@ pub struct Bitmask {
     path: PathBuf,
 }
 
+/// Access pattern to the bitmask is always random reads by the already calculated page id.
+/// We never need to iterate over multiple bitmask file pages in a row, therefore we can use random access.
+const DEFAULT_ADVICE: Advice = Advice::Random;
+
+
 impl Bitmask {
     pub fn files(&self) -> Vec<PathBuf> {
         vec![self.path.clone(), self.regions_gaps.path.clone()]
@@ -55,7 +60,7 @@ impl Bitmask {
         let bits = page_size / BLOCK_SIZE_BYTES;
 
         // length in bytes
-        bits / 8
+        bits / u8::BITS as usize
     }
 
     /// Create a bitmask for one page
@@ -70,7 +75,7 @@ impl Bitmask {
         // create bitmask mmap
         let path = Self::bitmask_path(dir);
         create_and_ensure_length(&path, length).unwrap();
-        let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
+        let mmap = open_write_mmap(&path, AdviceSetting::from(DEFAULT_ADVICE), false).unwrap();
         let mmap_bitslice = MmapBitSlice::from(mmap, 0);
 
         assert_eq!(mmap_bitslice.len(), length * 8, "Bitmask length mismatch");
@@ -99,7 +104,7 @@ impl Bitmask {
         if !path.exists() {
             return None;
         }
-        let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
+        let mmap = open_write_mmap(&path, AdviceSetting::from(DEFAULT_ADVICE), false).unwrap();
         let mmap_bitslice = MmapBitSlice::from(mmap, 0);
 
         let bitmask_gaps = BitmaskGaps::open(dir.to_owned());
@@ -138,9 +143,9 @@ impl Bitmask {
 
         // reopen the file with a larger size
         let previous_bitslice_len = self.bitslice.len();
-        let new_length = (previous_bitslice_len / 8) + extra_length;
+        let new_length = (previous_bitslice_len / u8::BITS as usize) + extra_length;
         create_and_ensure_length(&self.path, new_length).unwrap();
-        let mmap = open_write_mmap(&self.path, AdviceSetting::from(Advice::Normal), false).unwrap();
+        let mmap = open_write_mmap(&self.path, AdviceSetting::from(DEFAULT_ADVICE), false).unwrap();
 
         self.bitslice = MmapBitSlice::from(mmap, 0);
 
