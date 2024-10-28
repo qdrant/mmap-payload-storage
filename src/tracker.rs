@@ -124,8 +124,8 @@ impl Tracker {
             // account for missing size + extra to avoid resizing too often
             let new_size = self.mmap.len() + missing_space + Self::DEFAULT_SIZE;
             create_and_ensure_length(&self.path, new_size).unwrap();
-            self.mmap =
-                open_write_mmap(&self.path, AdviceSetting::from(TRACKER_MEM_ADVICE), false).unwrap();
+            self.mmap = open_write_mmap(&self.path, AdviceSetting::from(TRACKER_MEM_ADVICE), false)
+                .unwrap();
         }
         self.mmap[start_offset..end_offset].copy_from_slice(transmute_to_u8(&pointer));
     }
@@ -152,7 +152,7 @@ impl Tracker {
     }
 
     /// Iterate over the pointers in the tracker
-    pub fn iter_pointers(&self) -> impl Iterator<Item=Option<ValuePointer>> + '_ {
+    pub fn iter_pointers(&self) -> impl Iterator<Item = Option<ValuePointer>> + '_ {
         (0..self.header.max_point_offset).map(move |i| self.get(i as PointOffset))
     }
 

@@ -37,7 +37,6 @@ pub struct Bitmask {
 /// We never need to iterate over multiple bitmask file pages in a row, therefore we can use random access.
 const DEFAULT_ADVICE: Advice = Advice::Random;
 
-
 impl Bitmask {
     pub fn files(&self) -> Vec<PathBuf> {
         vec![self.path.clone(), self.regions_gaps.path.clone()]
@@ -479,35 +478,35 @@ mod tests {
         fn regions_bitvec_with_max_gap(max_gap_size: usize) (len in 0..REGION_SIZE_BLOCKS*4) -> (BitVec, usize) {
             assert!(max_gap_size > 0);
             let len = len.next_multiple_of(REGION_SIZE_BLOCKS);
-        
+
             let mut bitvec = BitVec::new();
             bitvec.resize(len as usize, true);
-            
+
             let mut rng = thread_rng();
-            
+
             let mut i = 0;
             let mut max_gap = 0;
             while i < len {
                 let run = rng.gen_range(1..max_gap_size).min(len - i);
                 let skip = rng.gen_range(1..max_gap_size);
-                
+
                 for j in 0..run {
                     bitvec.set(i as usize + j as usize, false);
                 }
-                
+
                 if run > max_gap {
                     max_gap = run;
                 }
-                
+
                 i += run + skip;
             }
-            
+
             (bitvec, max_gap)
         }
     }
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(1000))]
-        
+
         #[test]
         fn test_find_available_blocks_properties((bitvec, max_gap) in regions_bitvec_with_max_gap(120)) {
             let bitslice = bitvec.as_bitslice();
@@ -533,7 +532,7 @@ mod tests {
                     prop_assert!(false, "Should've found a free range")
                 }
             }
-            
+
             // For a block size that doesn't fit
             let req_blocks = max_gap + 1;
             prop_assert!(super::Bitmask::find_available_blocks_in_slice(
