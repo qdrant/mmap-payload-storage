@@ -41,15 +41,15 @@ struct TrackerHeader {
 #[derive(Debug)]
 pub struct Tracker {
     /// Path to the file
-    path: PathBuf,         
+    path: PathBuf,
     /// Header of the file
-    header: TrackerHeader, 
+    header: TrackerHeader,
     /// Mmap of the file
-    mmap: MmapMut,         
+    mmap: MmapMut,
 }
 
 impl Tracker {
-    const FILE_NAME: &'static str = "page_tracker.dat";
+    const FILE_NAME: &'static str = "tracker.dat";
     const DEFAULT_SIZE: usize = 1024 * 1024; // 1MB
 
     pub fn files(&self) -> Vec<PathBuf> {

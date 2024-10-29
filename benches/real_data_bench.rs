@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use mmap_payload_storage::fixtures::{empty_storage, HM_FIELDS};
-use mmap_payload_storage::payload::Payload;
+use mmap_value_storage::fixtures::{empty_storage, HM_FIELDS};
+use mmap_value_storage::payload::Payload;
 use serde_json::Value;
 
 pub fn real_data_data_bench(c: &mut Criterion) {
@@ -22,7 +22,7 @@ pub fn real_data_data_bench(c: &mut Criterion) {
                         Value::String(record.get(i).unwrap().to_string()),
                     );
                 }
-                storage.put_payload(point_offset, &payload);
+                storage.put_value(point_offset, &payload);
                 point_offset += 1;
             }
             assert_eq!(point_offset, expected_point_count);
@@ -32,7 +32,7 @@ pub fn real_data_data_bench(c: &mut Criterion) {
     c.bench_function("read real payload", |b| {
         b.iter(|| {
             for i in 0..expected_point_count {
-                let res = storage.get_payload(i).unwrap();
+                let res = storage.get_value(i).unwrap();
                 assert!(res.0.contains_key("article_id"));
             }
         });

@@ -7,11 +7,11 @@ use bitvec::slice::BitSlice;
 use gaps::{BitmaskGaps, RegionGaps};
 use itertools::Itertools;
 
-use crate::payload_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::{BlockOffset, PageId};
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use crate::utils_copied::mmap_type::{self, MmapBitSlice};
+use crate::value_storage::BLOCK_SIZE_BYTES;
 
 const BITMASK_NAME: &str = "bitmask.dat";
 pub const REGION_SIZE_BLOCKS: usize = 8_192;
@@ -39,7 +39,7 @@ const DEFAULT_ADVICE: Advice = Advice::Random;
 
 impl Bitmask {
     pub fn files(&self) -> Vec<PathBuf> {
-        vec![self.path.clone(), self.regions_gaps.path.clone()]
+        vec![self.path.clone(), self.regions_gaps.path()]
     }
 
     /// Calculate the amount of trailing free blocks in the bitmask.
@@ -83,7 +83,7 @@ impl Bitmask {
         let num_regions = mmap_bitslice.len() / REGION_SIZE_BLOCKS;
         let region_gaps = vec![RegionGaps::all_free(REGION_SIZE_BLOCKS as u16); num_regions];
 
-        let mmap_region_gaps = BitmaskGaps::create(dir.to_owned(), region_gaps.into_iter());
+        let mmap_region_gaps = BitmaskGaps::create(dir, region_gaps.into_iter());
 
         Self {
             page_size,
@@ -106,7 +106,7 @@ impl Bitmask {
         let mmap = open_write_mmap(&path, AdviceSetting::from(DEFAULT_ADVICE), false).unwrap();
         let mmap_bitslice = MmapBitSlice::from(mmap, 0);
 
-        let bitmask_gaps = BitmaskGaps::open(dir.to_owned());
+        let bitmask_gaps = BitmaskGaps::open(dir);
 
         Some(Self {
             regions_gaps: bitmask_gaps,
@@ -393,7 +393,7 @@ mod tests {
     use proptest::prelude::*;
     use rand::thread_rng;
 
-    use crate::{bitmask::REGION_SIZE_BLOCKS, payload_storage::BLOCK_SIZE_BYTES};
+    use crate::{bitmask::REGION_SIZE_BLOCKS, value_storage::BLOCK_SIZE_BYTES};
 
     #[test]
     fn test_length_for_page() {

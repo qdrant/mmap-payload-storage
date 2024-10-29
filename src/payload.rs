@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Map;
+
+use crate::value::Value;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct Payload(pub Map<String, Value>);
+pub struct Payload(pub Map<String, serde_json::Value>);
 
 impl Default for Payload {
     fn default() -> Self {
@@ -10,14 +12,14 @@ impl Default for Payload {
     }
 }
 
-impl Payload {
-    pub fn to_bytes(&self) -> Vec<u8> {
+impl Value for Payload {
+    fn to_bytes(&self) -> Vec<u8> {
         let mut vec = Vec::new();
         ciborium::ser::into_writer(self, &mut vec).unwrap();
         vec
     }
 
-    pub fn from_bytes(data: &[u8]) -> Self {
+    fn from_bytes(data: &[u8]) -> Self {
         ciborium::de::from_reader(data).unwrap()
     }
 }
@@ -25,6 +27,7 @@ impl Payload {
 #[cfg(test)]
 mod tests {
     use crate::payload::Payload;
+    use crate::value::Value;
 
     #[test]
     fn test_serde_symmetry() {
