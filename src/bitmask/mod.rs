@@ -239,6 +239,42 @@ impl Bitmask {
         const BITS_IN_CHUNK: u32 = usize::BITS;
         for (chunk_idx, chunk) in raw_region.iter().enumerate() {
             let mut chunk = *chunk;
+
+            // case of all zeros
+            if chunk == 0 {
+                current_size += BITS_IN_CHUNK;
+                continue;
+            }
+
+            if chunk == !0 {
+                // case of all ones
+                if current_size >= num_blocks {
+                    // bingo - we found a free cell of num_blocks
+                    return Some(translate_local_index(current_start));
+                }
+                current_size = 0;
+                current_start = (chunk_idx as u32 + 1) * BITS_IN_CHUNK;
+                continue;
+            }
+
+            // At least one non-zero bit
+            let leading = chunk.trailing_zeros();
+            let trailing = chunk.leading_zeros();
+
+            let max_possible_middle_gap = (BITS_IN_CHUNK - leading - trailing).saturating_sub(2);
+
+            // Skip looking for local max if it won't improve global max
+            if num_blocks > max_possible_middle_gap {
+                current_size += leading;
+                if current_size >= num_blocks {
+                    // bingo - we found a free cell of num_blocks
+                    return Some(translate_local_index(current_start));
+                }
+                current_size = trailing;
+                current_start = (chunk_idx as u32) * BITS_IN_CHUNK + BITS_IN_CHUNK - trailing;
+                continue;
+            }
+
             while chunk != 0 {
                 let num_zeros = chunk.trailing_zeros();
                 current_size += num_zeros;
