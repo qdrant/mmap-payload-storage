@@ -26,8 +26,8 @@ impl Value for Payload {
 
 #[cfg(test)]
 mod tests {
-    use crate::value::Value;
     use crate::payload::Payload;
+    use crate::value::Value;
 
     #[test]
     fn test_serde_symmetry() {

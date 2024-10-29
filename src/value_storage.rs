@@ -378,7 +378,10 @@ mod tests {
     use super::*;
 
     use crate::{
-        bitmask::REGION_SIZE_BLOCKS, fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS}, payload::Payload, value::Value
+        bitmask::REGION_SIZE_BLOCKS,
+        fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS},
+        payload::Payload,
+        value::Value,
     };
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
     use rstest::rstest;
@@ -411,9 +414,10 @@ mod tests {
         let (_dir, mut storage) = empty_storage();
 
         let mut payload = Payload::default();
-        payload
-            .0
-            .insert("key".to_string(), serde_json::Value::String("value".to_string()));
+        payload.0.insert(
+            "key".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
@@ -433,9 +437,10 @@ mod tests {
         let (_dir, mut storage) = empty_storage();
 
         let mut payload = Payload::default();
-        payload
-            .0
-            .insert("key".to_string(), serde_json::Value::String("value".to_string()));
+        payload.0.insert(
+            "key".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
@@ -594,9 +599,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_behave_like_hashmap(
-        #[values(1_048_576, 2_097_152, PAGE_SIZE_BYTES)] page_size: usize,
-    ) {
+    fn test_behave_like_hashmap(#[values(1_048_576, 2_097_152, PAGE_SIZE_BYTES)] page_size: usize) {
         let (dir, mut storage) = empty_storage_sized(page_size);
 
         let rng = &mut rand::thread_rng();
@@ -645,7 +648,8 @@ mod tests {
         drop(storage);
 
         // reopen storage
-        let storage = ValueStorage::<Payload>::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
+        let storage =
+            ValueStorage::<Payload>::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
 
         // asset same length
         assert_eq!(storage.tracker.mapping_len(), model_hashmap.len());
@@ -675,7 +679,8 @@ mod tests {
         let distr = Uniform::new('a', 'z');
         let rng = rand::thread_rng();
 
-        let huge_value = serde_json::Value::String(distr.sample_iter(rng).take(huge_payload_size).collect());
+        let huge_value =
+            serde_json::Value::String(distr.sample_iter(rng).take(huge_payload_size).collect());
         payload.0.insert("huge".to_string(), huge_value);
 
         storage.put_value(0, &payload);
@@ -713,9 +718,10 @@ mod tests {
         let path = dir.path().to_path_buf();
 
         let mut payload = Payload::default();
-        payload
-            .0
-            .insert("key".to_string(), serde_json::Value::String("value".to_string()));
+        payload.0.insert(
+            "key".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
 
         {
             let mut storage = ValueStorage::new(path.clone(), None);
@@ -767,7 +773,10 @@ mod tests {
             point_offset
         }
 
-        fn storage_double_pass_is_consistent(storage: &ValueStorage<Payload>, right_shift_offset: u32) {
+        fn storage_double_pass_is_consistent(
+            storage: &ValueStorage<Payload>,
+            right_shift_offset: u32,
+        ) {
             // validate storage value equality between the two writes
             let csv_data = include_str!("../data/h&m-articles.csv");
             let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
