@@ -1,13 +1,14 @@
 //! Implements Bustle traits for comparing performance against other kv stores.
-
+#[cfg(feature = "rocksdb")]
 use ::rocksdb::DB;
 use bustle::{Mix, Workload};
 use fixture::ArcStorage;
-use mmap_value_storage::ValueStorage;
 use mmap_value_storage::payload::Payload;
+use mmap_value_storage::ValueStorage;
 
 mod fixture;
 mod payload_storage;
+#[cfg(feature = "rocksdb")]
 mod rocksdb;
 
 type PayloadStorage = ValueStorage<Payload>;
@@ -18,7 +19,7 @@ fn default_opts(workload: &mut Workload) -> &mut Workload {
 }
 
 fn main() {
-    for n in [1, 4].into_iter() {
+    for n in [1].into_iter() {
         println!("------------ {} thread(s) -------------", n);
         // Read heavy
         println!("**read_heavy** with prefill_fraction 0.95");
@@ -27,8 +28,11 @@ fn main() {
         println!("ValueStorage:");
         workload.run::<ArcStorage<PayloadStorage>>();
 
-        println!("RocksDB:");
-        workload.run::<ArcStorage<DB>>();
+        #[cfg(feature = "rocksdb")]
+        {
+            println!("RocksDB:");
+            workload.run::<ArcStorage<DB>>();
+        }
         println!(" ");
 
         // Insert heavy
@@ -39,8 +43,11 @@ fn main() {
         println!("ValueStorage:");
         workload.run::<ArcStorage<PayloadStorage>>();
 
-        println!("RocksDB:");
-        workload.run::<ArcStorage<DB>>();
+        #[cfg(feature = "rocksdb")]
+        {
+            println!("RocksDB:");
+            workload.run::<ArcStorage<DB>>();
+        }
         println!(" ");
 
         // Update heavy
@@ -51,8 +58,11 @@ fn main() {
         println!("ValueStorage:");
         workload.run::<ArcStorage<PayloadStorage>>();
 
-        println!("RocksDB:");
-        workload.run::<ArcStorage<DB>>();
+        #[cfg(feature = "rocksdb")]
+        {
+            println!("RocksDB:");
+            workload.run::<ArcStorage<DB>>();
+        }
         println!(" ");
     }
 }
