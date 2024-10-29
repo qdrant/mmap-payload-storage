@@ -6,5 +6,6 @@ mod value_storage;
 mod stats;
 mod tracker;
 mod utils_copied;
+pub mod value;
 
 pub use value_storage::ValueStorage;
