@@ -1,4 +1,4 @@
-use crate::payload_storage::BLOCK_SIZE_BYTES;
+use crate::value_storage::BLOCK_SIZE_BYTES;
 use crate::tracker::BlockOffset;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};

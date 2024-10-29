@@ -3,7 +3,7 @@
 use ::rocksdb::DB;
 use bustle::{Mix, Workload};
 use fixture::ArcStorage;
-use mmap_payload_storage::PayloadStorage;
+use mmap_value_storage::ValueStorage;
 
 mod fixture;
 mod payload_storage;
@@ -15,41 +15,41 @@ fn default_opts(workload: &mut Workload) -> &mut Workload {
 }
 
 fn main() {
-    for n in [1].into_iter() {
+    for n in [1, 4].into_iter() {
         println!("------------ {} thread(s) -------------", n);
         // Read heavy
         println!("**read_heavy** with prefill_fraction 0.95");
         let mut workload = Workload::new(n, Mix::read_heavy());
         default_opts(&mut workload).prefill_fraction(0.95);
-        println!("PayloadStorage:");
-        workload.run::<ArcStorage<PayloadStorage>>();
+        println!("ValueStorage:");
+        workload.run::<ArcStorage<ValueStorage>>();
 
         println!("RocksDB:");
         workload.run::<ArcStorage<DB>>();
-        println!("");
+        println!(" ");
 
         // Insert heavy
         println!("**insert_heavy** with prefill_fraction 0.0");
         let mut workload = Workload::new(n, Mix::insert_heavy());
         default_opts(&mut workload).prefill_fraction(0.0);
 
-        println!("PayloadStorage:");
-        workload.run::<ArcStorage<PayloadStorage>>();
+        println!("ValueStorage:");
+        workload.run::<ArcStorage<ValueStorage>>();
 
         println!("RocksDB:");
         workload.run::<ArcStorage<DB>>();
-        println!("");
+        println!(" ");
 
         // Update heavy
         println!("**update_heavy** with prefill_fraction 0.5");
         let mut workload = Workload::new(n, Mix::update_heavy());
         default_opts(&mut workload).prefill_fraction(0.5);
 
-        println!("PayloadStorage:");
-        workload.run::<ArcStorage<PayloadStorage>>();
+        println!("ValueStorage:");
+        workload.run::<ArcStorage<ValueStorage>>();
 
         println!("RocksDB:");
         workload.run::<ArcStorage<DB>>();
-        println!("");
+        println!(" ");
     }
 }

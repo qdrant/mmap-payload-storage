@@ -49,7 +49,7 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    const FILE_NAME: &'static str = "page_tracker.dat";
+    const FILE_NAME: &'static str = "tracker.dat";
     const DEFAULT_SIZE: usize = 1024 * 1024; // 1MB
 
     pub fn files(&self) -> Vec<PathBuf> {

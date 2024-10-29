@@ -1,4 +1,5 @@
-use std::{ops::Range, path::PathBuf};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use itertools::Itertools;
 
@@ -69,11 +70,15 @@ pub(super) struct BitmaskGaps {
 }
 
 impl BitmaskGaps {
-    fn file_path(dir: PathBuf) -> PathBuf {
+    fn file_path(dir: &Path) -> PathBuf {
         dir.join("gaps.dat")
     }
 
-    pub fn create(dir: PathBuf, mut iter: impl ExactSizeIterator<Item = RegionGaps>) -> Self {
+    pub fn path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    pub fn create(dir: &Path, mut iter: impl ExactSizeIterator<Item = RegionGaps>) -> Self {
         let path = Self::file_path(dir);
 
         let length_in_bytes = iter.len() * size_of::<RegionGaps>();
@@ -89,7 +94,7 @@ impl BitmaskGaps {
         Self { path, mmap_slice }
     }
 
-    pub fn open(dir: PathBuf) -> Self {
+    pub fn open(dir: &Path) -> Self {
         let path = Self::file_path(dir);
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
         let mmap_slice = unsafe { MmapSlice::from(mmap) };
@@ -341,7 +346,7 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let dir_path = dir.path().to_path_buf();
+        let dir_path = dir.path();
 
         let gaps = vec![
             RegionGaps::new(1, 2, 3),
@@ -351,7 +356,7 @@ mod tests {
 
         // Create RegionGaps and write gaps
         {
-            let region_gaps = BitmaskGaps::create(dir_path.clone(), gaps.clone().into_iter());
+            let region_gaps = BitmaskGaps::create(dir_path, gaps.clone().into_iter());
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);
@@ -360,7 +365,7 @@ mod tests {
 
         // Reopen RegionGaps and verify gaps
         {
-            let region_gaps = BitmaskGaps::open(dir_path.clone());
+            let region_gaps = BitmaskGaps::open(dir_path);
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);
@@ -371,7 +376,7 @@ mod tests {
         let more_gaps = vec![RegionGaps::new(10, 11, 12), RegionGaps::new(13, 14, 15)];
 
         {
-            let mut region_gaps = BitmaskGaps::open(dir_path.clone());
+            let mut region_gaps = BitmaskGaps::open(dir_path);
             region_gaps.extend(more_gaps.clone().into_iter());
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
@@ -381,7 +386,7 @@ mod tests {
 
         // Reopen RegionGaps and verify all gaps
         {
-            let region_gaps = BitmaskGaps::open(dir_path.clone());
+            let region_gaps = BitmaskGaps::open(dir_path);
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);

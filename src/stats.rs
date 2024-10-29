@@ -1,4 +1,4 @@
-use crate::PayloadStorage;
+use crate::ValueStorage;
 
 pub struct StorageStats {
     /// The number of pages in the storage
@@ -17,7 +17,7 @@ pub struct StorageStats {
     pub total_size_bytes: usize,
 }
 
-impl PayloadStorage {
+impl ValueStorage {
     /// Storage-wide statistics
     pub fn get_stats(&self) -> StorageStats {
         todo!("Implement get_stats");

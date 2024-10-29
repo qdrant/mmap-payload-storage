@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use bustle::Collection;
-use mmap_payload_storage::{fixtures::empty_storage, payload::Payload, PayloadStorage};
+use mmap_value_storage::{fixtures::empty_storage, payload::Payload, ValueStorage};
 use parking_lot::RwLock;
 
 use crate::fixture::{ArcStorage, SequentialCollectionHandle, StorageProxy};
 
-impl Collection for ArcStorage<PayloadStorage> {
+impl Collection for ArcStorage<ValueStorage> {
     type Handle = Self;
 
     fn with_capacity(_capacity: usize) -> Self {
@@ -27,21 +27,21 @@ impl Collection for ArcStorage<PayloadStorage> {
     }
 }
 
-impl SequentialCollectionHandle for PayloadStorage {
+impl SequentialCollectionHandle for ValueStorage {
     fn get(&self, key: &u32) -> bool {
-        self.get_payload(*key).is_some()
+        self.get_value(*key).is_some()
     }
 
     fn insert(&mut self, key: u32, payload: &Payload) -> bool {
-        !self.put_payload(key, payload)
+        !self.put_value(key, payload)
     }
 
     fn remove(&mut self, key: &u32) -> bool {
-        self.delete_payload(*key).is_some()
+        self.delete_value(*key).is_some()
     }
 
     fn update(&mut self, key: &u32, payload: &Payload) -> bool {
-        self.put_payload(*key, payload)
+        self.put_value(*key, payload)
     }
 
     fn flush(&self) -> bool {
