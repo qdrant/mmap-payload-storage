@@ -329,13 +329,39 @@ impl Bitmask {
         let mut num_shifts = 0;
         for chunk in raw_region {
             let mut chunk = *chunk;
+            // case of all zeros
+            if chunk == 0 {
+                current += BITS_IN_CHUNK;
+                continue;
+            }
+
+            if chunk == !0 {
+                // case of all ones
+                max = max.max(current);
+                current = 0;
+                continue;
+            }
+
+            // At least one non-zero bit
+            let leading = chunk.trailing_zeros() as u16;
+            let trailing = chunk.leading_zeros() as u16;
+
+            let max_possible_middle_gap = (BITS_IN_CHUNK - leading - trailing).saturating_sub(2);
+
+            // Skip looking for local max if it won't improve global max
+            if max > max_possible_middle_gap {
+                current += leading;
+                max = max.max(current);
+                current = trailing;
+                continue;
+            }
+
+            // Otherwise, look for the actual maximum in the chunk
             while chunk != 0 {
                 // count consecutive zeros
                 let num_zeros = chunk.trailing_zeros() as u16;
                 current += num_zeros;
-                if current > max {
-                    max = current;
-                }
+                max = max.max(current);
                 current = 0;
 
                 // shift by the number of zeros
@@ -359,9 +385,7 @@ impl Bitmask {
             num_shifts = 0;
         }
 
-        if current > max {
-            max = current;
-        }
+        max = max.max(current);
 
         let leading;
         let trailing;
