@@ -5,7 +5,6 @@ use crate::utils_copied::mmap_type;
 use crate::value::Value;
 
 use lz4_flex::compress_prepend_size;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Expect JSON values to have roughly 3–5 fields with mostly small values.
@@ -23,15 +22,12 @@ pub struct ValueStorage<V> {
     tracker: Tracker,
     /// Page size in bytes when creating new pages, normally 32MB
     pub(super) new_page_size: usize,
-    // TODO: turn hashmap into vec, all page ids are sequential now
     /// Mapping from page_id -> mmap page
-    pub(super) pages: HashMap<u32, Page>,
+    pub(super) pages: Vec<Page>,
     /// Bitmask to represent which "blocks" of data in the pages are used and which are free.
     ///
     /// 0 is free, 1 is used.
     bitmask: Bitmask,
-    /// Same as `pages.len()`, but used to create new pages
-    next_page_id: u32,
     /// Path of the directory where the storage files are stored
     base_path: PathBuf,
     _value_type: std::marker::PhantomData<V>,
@@ -55,14 +51,18 @@ impl<V: Value> ValueStorage<V> {
             paths.push(tracker_file);
         }
         // pages files
-        for pages in self.pages.keys() {
-            paths.push(self.page_path(*pages));
+        for page_id in 0..self.next_page_id() {
+            paths.push(self.page_path(page_id));
         }
         // bitmask files
         for bitmask_file in self.bitmask.files() {
             paths.push(bitmask_file);
         }
         paths
+    }
+
+    fn next_page_id(&self) -> PageId {
+        self.pages.len() as PageId
     }
 
     /// Initializes a new storage with a single empty page.
@@ -76,24 +76,22 @@ impl<V: Value> ValueStorage<V> {
         let mut storage = Self {
             tracker: Tracker::new(&base_path, None),
             new_page_size: page_size,
-            pages: HashMap::new(),
+            pages: Default::default(),
             bitmask: Bitmask::create(&base_path, page_size),
-            next_page_id: 0,
             base_path,
             _value_type: std::marker::PhantomData,
         };
 
         // create first page to be covered by the bitmask
-        let new_page_id = storage.next_page_id;
+        let new_page_id = storage.next_page_id();
         let path = storage.page_path(new_page_id);
         let page = Page::new(&path, storage.new_page_size);
-        let was_created = storage.add_page(new_page_id, page);
-        assert!(was_created);
+        storage.pages.push(page);
 
         storage
     }
 
-    /// Open an existing storageo at the given path
+    /// Open an existing storage at the given path
     /// Returns None if the storage does not exist
     pub fn open(path: PathBuf, new_page_size: Option<usize>) -> Option<Self> {
         let new_page_size = new_page_size.unwrap_or(PAGE_SIZE_BYTES);
@@ -110,15 +108,14 @@ impl<V: Value> ValueStorage<V> {
             new_page_size,
             pages: Default::default(),
             bitmask,
-            next_page_id: 0,
             base_path: path.clone(),
             _value_type: std::marker::PhantomData,
         };
         for page_id in 0..num_pages as PageId {
             let page_path = storage.page_path(page_id);
-            let slotted_page = Page::open(&page_path).expect("Page not found");
+            let page = Page::open(&page_path).expect("Page not found");
 
-            storage.add_page(page_id, slotted_page);
+            storage.pages.push(page);
         }
         Some(storage)
     }
@@ -126,23 +123,6 @@ impl<V: Value> ValueStorage<V> {
     /// Get the path for a given page id
     pub fn page_path(&self, page_id: u32) -> PathBuf {
         self.base_path.join(format!("page_{}.dat", page_id))
-    }
-
-    /// Add a page to the storage. If it already exists, returns false
-    fn add_page(&mut self, page_id: u32, page: Page) -> bool {
-        let page_exists = self.pages.contains_key(&page_id);
-        if page_exists {
-            return false;
-        }
-
-        debug_assert_eq!(page_id, self.next_page_id, "Page id mismatch");
-
-        let previous = self.pages.insert(page_id, page);
-        debug_assert!(previous.is_none());
-
-        self.next_page_id += 1;
-
-        true
     }
 
     /// Read raw value from the pages. Considering that they can span more than one page.
@@ -155,7 +135,7 @@ impl<V: Value> ValueStorage<V> {
         let mut raw_sections = vec![];
 
         for page_id in start_page_id.. {
-            let page = self.pages.get(&page_id).expect("Page not found");
+            let page = &self.pages[page_id as usize];
             let (raw, unread_bytes) = page.read_value(block_offset, length);
             raw_sections.extend(raw);
 
@@ -190,11 +170,10 @@ impl<V: Value> ValueStorage<V> {
     ///
     /// Returns the new page id
     fn create_new_page(&mut self) -> u32 {
-        let new_page_id = self.next_page_id;
+        let new_page_id = self.next_page_id();
         let path = self.page_path(new_page_id);
         let page = Page::new(&path, self.new_page_size);
-        let was_created = self.add_page(new_page_id, page);
-        assert!(was_created);
+        self.pages.push(page);
 
         self.bitmask.cover_new_page();
 
@@ -244,10 +223,7 @@ impl<V: Value> ValueStorage<V> {
         let mut unwritten_tail = value_size;
 
         for page_id in start_page_id.. {
-            let page = self
-                .pages
-                .get_mut(&page_id)
-                .unwrap_or_else(|| panic!("Page {page_id} not found"));
+            let page = &mut self.pages[page_id as usize];
 
             let range = (value_size - unwritten_tail)..;
             unwritten_tail = page.write_value(block_offset, &value[range]);
@@ -343,7 +319,7 @@ impl<V: Value> ValueStorage<V> {
     /// Flush all mmap pages to disk
     pub fn flush(&self) -> Result<(), mmap_type::Error> {
         self.tracker.flush()?;
-        for page in self.pages.values() {
+        for page in &self.pages {
             page.flush()?;
         }
         self.bitmask.flush()?;
@@ -600,6 +576,8 @@ mod tests {
 
     #[rstest]
     fn test_behave_like_hashmap(#[values(1_048_576, 2_097_152, PAGE_SIZE_BYTES)] page_size: usize) {
+        use std::collections::HashMap;
+
         let (dir, mut storage) = empty_storage_sized(page_size);
 
         let rng = &mut rand::thread_rng();
