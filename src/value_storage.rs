@@ -1,8 +1,8 @@
 use crate::bitmask::Bitmask;
 use crate::page::Page;
-use crate::payload::Payload;
 use crate::tracker::{BlockOffset, PageId, PointOffset, Tracker, ValuePointer};
 use crate::utils_copied::mmap_type;
+use crate::value::Value;
 
 use lz4_flex::compress_prepend_size;
 use std::collections::HashMap;
@@ -12,8 +12,11 @@ use std::path::PathBuf;
 /// For 1M values, this would require 128MB of memory.
 pub const BLOCK_SIZE_BYTES: usize = 128;
 
+/// Default page size used when not specified
+pub const PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
+
 #[derive(Debug)]
-pub struct ValueStorage {
+pub struct ValueStorage<V> {
     /// Holds mapping from `PointOffset` -> `ValuePointer`
     ///
     /// Stored in a separate file
@@ -31,12 +34,10 @@ pub struct ValueStorage {
     next_page_id: u32,
     /// Path of the directory where the storage files are stored
     base_path: PathBuf,
+    _value_type: std::marker::PhantomData<V>,
 }
 
-impl ValueStorage {
-    /// Default page size used when not specified
-    pub const PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
-
+impl<V: Value> ValueStorage<V> {
     /// LZ4 compression
     fn compress(value: &[u8]) -> Vec<u8> {
         compress_prepend_size(value)
@@ -71,7 +72,7 @@ impl ValueStorage {
     pub fn new(base_path: PathBuf, page_size: Option<usize>) -> Self {
         assert!(base_path.exists(), "Base path does not exist");
         assert!(base_path.is_dir(), "Base path is not a directory");
-        let page_size = page_size.unwrap_or(Self::PAGE_SIZE_BYTES);
+        let page_size = page_size.unwrap_or(PAGE_SIZE_BYTES);
         let mut storage = Self {
             tracker: Tracker::new(&base_path, None),
             new_page_size: page_size,
@@ -79,6 +80,7 @@ impl ValueStorage {
             bitmask: Bitmask::create(&base_path, page_size),
             next_page_id: 0,
             base_path,
+            _value_type: std::marker::PhantomData,
         };
 
         // create first page to be covered by the bitmask
@@ -94,7 +96,7 @@ impl ValueStorage {
     /// Open an existing storageo at the given path
     /// Returns None if the storage does not exist
     pub fn open(path: PathBuf, new_page_size: Option<usize>) -> Option<Self> {
-        let new_page_size = new_page_size.unwrap_or(Self::PAGE_SIZE_BYTES);
+        let new_page_size = new_page_size.unwrap_or(PAGE_SIZE_BYTES);
 
         let page_tracker = Tracker::open(&path)?;
 
@@ -110,6 +112,7 @@ impl ValueStorage {
             bitmask,
             next_page_id: 0,
             base_path: path.clone(),
+            _value_type: std::marker::PhantomData,
         };
         for page_id in 0..num_pages as PageId {
             let page_path = storage.page_path(page_id);
@@ -168,7 +171,7 @@ impl ValueStorage {
     }
 
     /// Get the value for a given point offset
-    pub fn get_value(&self, point_offset: PointOffset) -> Option<Payload> {
+    pub fn get_value(&self, point_offset: PointOffset) -> Option<V> {
         let ValuePointer {
             page_id,
             block_offset,
@@ -177,9 +180,9 @@ impl ValueStorage {
 
         let raw = self.read_from_pages(page_id, block_offset, length);
         let decompressed = Self::decompress(&raw);
-        let payload = Payload::from_bytes(&decompressed);
+        let value = V::from_bytes(&decompressed);
 
-        Some(payload)
+        Some(value)
     }
 
     /// Create a new page and return its id.
@@ -260,7 +263,7 @@ impl ValueStorage {
     /// Put a value in the storage.
     ///
     /// Returns true if the value existed previously and was updated, false if it was newly inserted.
-    pub fn put_value(&mut self, point_offset: PointOffset, value: &Payload) -> bool {
+    pub fn put_value(&mut self, point_offset: PointOffset, value: &V) -> bool {
         let value_bytes = value.to_bytes();
         let comp_value = Self::compress(&value_bytes);
         let value_size = comp_value.len();
@@ -305,7 +308,7 @@ impl ValueStorage {
     /// Returns None if the point_offset, page, or value was not found
     ///
     /// Returns the deleted value otherwise
-    pub fn delete_value(&mut self, point_offset: PointOffset) -> Option<Payload> {
+    pub fn delete_value(&mut self, point_offset: PointOffset) -> Option<V> {
         let ValuePointer {
             page_id,
             block_offset,
@@ -313,7 +316,7 @@ impl ValueStorage {
         } = self.get_pointer(point_offset)?;
         let raw = self.read_from_pages(page_id, block_offset, length);
         let decompressed = Self::decompress(&raw);
-        let value = Payload::from_bytes(&decompressed);
+        let value = V::from_bytes(&decompressed);
 
         // delete mapping
         self.tracker.unset(point_offset);
@@ -350,7 +353,7 @@ impl ValueStorage {
     /// Iterate over all the values in the storage
     pub fn iter<F>(&self, mut callback: F) -> std::io::Result<()>
     where
-        F: FnMut(PointOffset, &Payload) -> std::io::Result<bool>,
+        F: FnMut(PointOffset, &V) -> std::io::Result<bool>,
     {
         for pointer in self.tracker.iter_pointers().flatten() {
             let ValuePointer {
@@ -361,7 +364,7 @@ impl ValueStorage {
 
             let raw = self.read_from_pages(page_id, block_offset, length);
             let decompressed = Self::decompress(&raw);
-            let value = Payload::from_bytes(&decompressed);
+            let value = V::from_bytes(&decompressed);
             if !callback(block_offset, &value)? {
                 return Ok(());
             }
@@ -373,11 +376,9 @@ impl ValueStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     use crate::{
-        bitmask::REGION_SIZE_BLOCKS,
-        fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS},
+        bitmask::REGION_SIZE_BLOCKS, fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS}, payload::Payload, value::Value
     };
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
     use rstest::rstest;
@@ -412,7 +413,7 @@ mod tests {
         let mut payload = Payload::default();
         payload
             .0
-            .insert("key".to_string(), Value::String("value".to_string()));
+            .insert("key".to_string(), serde_json::Value::String("value".to_string()));
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
@@ -434,7 +435,7 @@ mod tests {
         let mut payload = Payload::default();
         payload
             .0
-            .insert("key".to_string(), Value::String("value".to_string()));
+            .insert("key".to_string(), serde_json::Value::String("value".to_string()));
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
@@ -479,9 +480,10 @@ mod tests {
         let (_dir, mut storage) = empty_storage();
 
         let mut payload = Payload::default();
-        payload
-            .0
-            .insert("key".to_string(), Value::String("value".to_string()));
+        payload.0.insert(
+            "key".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
@@ -508,9 +510,10 @@ mod tests {
         let (_dir, mut storage) = empty_storage();
 
         let mut payload = Payload::default();
-        payload
-            .0
-            .insert("key".to_string(), Value::String("value".to_string()));
+        payload.0.insert(
+            "key".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
@@ -526,9 +529,10 @@ mod tests {
 
         // update payload
         let mut updated_payload = Payload::default();
-        updated_payload
-            .0
-            .insert("key".to_string(), Value::String("updated".to_string()));
+        updated_payload.0.insert(
+            "key".to_string(),
+            serde_json::Value::String("updated".to_string()),
+        );
 
         storage.put_value(0, &updated_payload);
         assert_eq!(storage.pages.len(), 1);
@@ -591,7 +595,7 @@ mod tests {
 
     #[rstest]
     fn test_behave_like_hashmap(
-        #[values(1_048_576, 2_097_152, ValueStorage::PAGE_SIZE_BYTES)] page_size: usize,
+        #[values(1_048_576, 2_097_152, PAGE_SIZE_BYTES)] page_size: usize,
     ) {
         let (dir, mut storage) = empty_storage_sized(page_size);
 
@@ -641,7 +645,7 @@ mod tests {
         drop(storage);
 
         // reopen storage
-        let storage = ValueStorage::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
+        let storage = ValueStorage::<Payload>::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
 
         // asset same length
         assert_eq!(storage.tracker.mapping_len(), model_hashmap.len());
@@ -671,7 +675,7 @@ mod tests {
         let distr = Uniform::new('a', 'z');
         let rng = rand::thread_rng();
 
-        let huge_value = Value::String(distr.sample_iter(rng).take(huge_payload_size).collect());
+        let huge_value = serde_json::Value::String(distr.sample_iter(rng).take(huge_payload_size).collect());
         payload.0.insert("huge".to_string(), huge_value);
 
         storage.put_value(0, &payload);
@@ -711,7 +715,7 @@ mod tests {
         let mut payload = Payload::default();
         payload
             .0
-            .insert("key".to_string(), Value::String("value".to_string()));
+            .insert("key".to_string(), serde_json::Value::String("value".to_string()));
 
         {
             let mut storage = ValueStorage::new(path.clone(), None);
@@ -732,7 +736,7 @@ mod tests {
         }
 
         // reopen storage
-        let storage = ValueStorage::open(path.clone(), None).unwrap();
+        let storage = ValueStorage::<Payload>::open(path.clone(), None).unwrap();
         assert_eq!(storage.pages.len(), 1);
 
         let stored_payload = storage.get_value(0);
@@ -744,7 +748,7 @@ mod tests {
     fn test_with_real_hm_data() {
         const EXPECTED_LEN: usize = 105_542;
 
-        fn write_data(storage: &mut ValueStorage, init_offset: u32) -> u32 {
+        fn write_data(storage: &mut ValueStorage<Payload>, init_offset: u32) -> u32 {
             let csv_data = include_str!("../data/h&m-articles.csv");
             let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
             let mut point_offset = init_offset;
@@ -754,7 +758,7 @@ mod tests {
                 for (i, field) in HM_FIELDS.iter().enumerate() {
                     payload.0.insert(
                         field.to_string(),
-                        Value::String(record.get(i).unwrap().to_string()),
+                        serde_json::Value::String(record.get(i).unwrap().to_string()),
                     );
                 }
                 storage.put_value(point_offset, &payload);
@@ -763,7 +767,7 @@ mod tests {
             point_offset
         }
 
-        fn storage_double_pass_is_consistent(storage: &ValueStorage, right_shift_offset: u32) {
+        fn storage_double_pass_is_consistent(storage: &ValueStorage<Payload>, right_shift_offset: u32) {
             // validate storage value equality between the two writes
             let csv_data = include_str!("../data/h&m-articles.csv");
             let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
@@ -843,9 +847,9 @@ mod tests {
     fn test_payload_compression() {
         let payload = random_payload(&mut rand::thread_rng(), 2);
         let payload_bytes = payload.to_bytes();
-        let compressed = ValueStorage::compress(&payload_bytes);
-        let decompressed = ValueStorage::decompress(&compressed);
-        let decompressed_payload = Payload::from_bytes(&decompressed);
+        let compressed = ValueStorage::<Payload>::compress(&payload_bytes);
+        let decompressed = ValueStorage::<Payload>::decompress(&compressed);
+        let decompressed_payload = <Payload as Value>::from_bytes(&decompressed);
         assert_eq!(payload, decompressed_payload);
     }
 }

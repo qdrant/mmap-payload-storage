@@ -17,7 +17,7 @@ pub struct StorageStats {
     pub total_size_bytes: usize,
 }
 
-impl ValueStorage {
+impl<V> ValueStorage<V> {
     /// Storage-wide statistics
     pub fn get_stats(&self) -> StorageStats {
         todo!("Implement get_stats");

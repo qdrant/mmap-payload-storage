@@ -5,8 +5,9 @@ use mmap_value_storage::{fixtures::empty_storage, payload::Payload, ValueStorage
 use parking_lot::RwLock;
 
 use crate::fixture::{ArcStorage, SequentialCollectionHandle, StorageProxy};
+use crate::PayloadStorage;
 
-impl Collection for ArcStorage<ValueStorage> {
+impl Collection for ArcStorage<PayloadStorage> {
     type Handle = Self;
 
     fn with_capacity(_capacity: usize) -> Self {
@@ -27,7 +28,7 @@ impl Collection for ArcStorage<ValueStorage> {
     }
 }
 
-impl SequentialCollectionHandle for ValueStorage {
+impl SequentialCollectionHandle for PayloadStorage {
     fn get(&self, key: &u32) -> bool {
         self.get_value(*key).is_some()
     }

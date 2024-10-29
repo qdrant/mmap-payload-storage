@@ -310,7 +310,7 @@ mod tests {
             num_blocks in 1..=(REGION_SIZE_BLOCKS as u32 * 3)
         ) {
             let temp_dir = tempdir().unwrap();
-            let bitmask_gaps = BitmaskGaps::create(temp_dir.path().to_path_buf(), gaps.clone().into_iter());
+            let bitmask_gaps = BitmaskGaps::create(temp_dir.path(), gaps.clone().into_iter());
 
             let bitvec = regions_gaps_to_bitvec(&gaps);
 

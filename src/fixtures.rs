@@ -5,14 +5,14 @@ use rand::Rng;
 use tempfile::{Builder, TempDir};
 
 /// Create an empty storage with the default configuration
-pub fn empty_storage() -> (TempDir, ValueStorage) {
+pub fn empty_storage() -> (TempDir, ValueStorage<Payload>) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
     let storage = ValueStorage::new(dir.path().to_path_buf(), None);
     (dir, storage)
 }
 
 /// Create an empty storage with a specific page size
-pub fn empty_storage_sized(page_size: usize) -> (TempDir, ValueStorage) {
+pub fn empty_storage_sized(page_size: usize) -> (TempDir, ValueStorage<Payload>) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
     let storage = ValueStorage::new(dir.path().to_path_buf(), Some(page_size));
     (dir, storage)
