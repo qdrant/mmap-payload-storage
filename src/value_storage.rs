@@ -235,16 +235,60 @@ impl<V: Value> ValueStorage<V> {
     ///
     /// Returns true if the value existed previously and was updated, false if it was newly inserted.
     pub fn put_value(&mut self, point_offset: PointOffset, value: &V) -> bool {
+        // This function needs to NOT corrupt data in case of a crash.
+        //
+        // Since we cannot know deterministically when a write is persisted without flushing explicitly,
+        // and we don't want to flush on every write, we decided to follow this approach:
+        // ┌─────────┐           ┌───────┐┌────┐┌────┐   ┌───────┐                            ┌─────┐
+        // │put_value│           │Tracker││Page││Gaps│   │Bitmask│                            │flush│
+        // └────┬────┘           └───┬───┘└─┬──┘└─┬──┘   └───┬───┘                            └──┬──┘
+        //      │                    │      │     │          │                                   │
+        //      │            Find a spot to write │          │                                   │
+        //      │───────────────────────────────────────────>│                                   │
+        //      │                    │      │     │          │                                   │
+        //      │              Page id + offset   │          │                                   │
+        //      │<───────────────────────────────────────────│                                   │
+        //      │                    │      │     │          │                                   │
+        //      │    Write data to page     │     │          │                                   │
+        //      │──────────────────────────>│     │          │                                   │
+        //      │                    │      │     │          │                                   │
+        //      │                Mark as used     │          │                                   │
+        //      │───────────────────────────────────────────>│                                   │
+        //      │                    │      │     │          │                                   │
+        //      │                    │      │     │Update gap│                                   │
+        //      │                    │      │     │<─────────│                                   │
+        //      │                    │      │     │          │                                   │
+        //      │Set pointer (in-ram)│      │     │          │                                   │
+        //      │───────────────────>│      │     │          │                                   │
+        //      │                    │      │     │          │                                   │
+        //      │                    │      │     │          │               flush               │
+        //      │                    │      │     │          │<──────────────────────────────────│
+        //      │                    │      │     │          │                                   │
+        //      │                    │      │     │  flush   │                                   │
+        //      │                    │      │     │<─────────│                                   │
+        //      │                    │      │     │          │                                   │
+        //      │                    │      │     │          │      flush                        │
+        //      │                    │      │<───────────────────────────────────────────────────│
+        //      │                    │      │     │          │                                   │
+        //      │                    │      │     │   Write from memory AND flush                │
+        //      │                    │<──────────────────────────────────────────────────────────│
+        //      │                    │      │     │          │                                   │
+        //      │                    │      │     │          │Mark all old as available and flush│
+        //      │                    │      │     │          │<──────────────────────────────────│
+        // ┌────┴────┐           ┌───┴───┐┌─┴──┐┌─┴──┐   ┌───┴───┐                            ┌──┴──┐
+        // │put_value│           │Tracker││Page││Gaps│   │Bitmask│                            │flush│
+        // └─────────┘           └───────┘└────┘└────┘   └───────┘                            └─────┘
+        //
+        // In case of crashing somewhere in the middle of this operation, the worst
+        // that should happen is that we mark more cells as used than they actually are,
+        // so will never reuse such space, but data will not be corrupted.
+
         let value_bytes = value.to_bytes();
         let comp_value = Self::compress(&value_bytes);
         let value_size = comp_value.len();
 
         let required_blocks = Self::blocks_for_value(value_size);
         let (start_page_id, block_offset) = self.find_or_create_available_blocks(required_blocks);
-
-        // In case of crashing somewhere in the middle of this operation, the worst
-        // that should happen is that we mark more cells as used than they actually are,
-        // so will never reuse such space, but data will not be corrupted.
 
         // insert into a new cell, considering that it can span more than one page
         self.write_into_pages(&comp_value, start_page_id, block_offset);
