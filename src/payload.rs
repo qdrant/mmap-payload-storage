@@ -14,13 +14,11 @@ impl Default for Payload {
 
 impl Value for Payload {
     fn to_bytes(&self) -> Vec<u8> {
-        let mut vec = Vec::new();
-        ciborium::ser::into_writer(self, &mut vec).unwrap();
-        vec
+        serde_json::to_vec(self).unwrap()
     }
 
     fn from_bytes(data: &[u8]) -> Self {
-        ciborium::de::from_reader(data).unwrap()
+        serde_json::from_slice(data).unwrap()
     }
 }
 
