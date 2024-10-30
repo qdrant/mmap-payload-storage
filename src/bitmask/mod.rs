@@ -363,8 +363,11 @@ impl Bitmask {
         let mut current = 0;
         const BITS_IN_CHUNK: u16 = usize::BITS as u16;
         let mut num_shifts = 0;
-        for chunk in raw_region {
-            let mut chunk = *chunk;
+        // In reverse, because we expect the regions to be filled start to end.
+        // So starting from the end should give us bigger `max` earlier.
+        for chunk in raw_region.iter().rev() {
+            // Ensure that the chunk is little-endian.
+            let mut chunk = chunk.to_le();
             // case of all zeros
             if chunk == 0 {
                 current += BITS_IN_CHUNK;
@@ -379,8 +382,8 @@ impl Bitmask {
             }
 
             // At least one non-zero bit
-            let leading = chunk.trailing_zeros() as u16;
-            let trailing = chunk.leading_zeros() as u16;
+            let leading = chunk.leading_zeros() as u16;
+            let trailing = chunk.trailing_zeros() as u16;
 
             let max_possible_middle_gap = (BITS_IN_CHUNK - leading - trailing).saturating_sub(2);
 
@@ -395,19 +398,19 @@ impl Bitmask {
             // Otherwise, look for the actual maximum in the chunk
             while chunk != 0 {
                 // count consecutive zeros
-                let num_zeros = chunk.trailing_zeros() as u16;
+                let num_zeros = chunk.leading_zeros() as u16;
                 current += num_zeros;
                 max = max.max(current);
                 current = 0;
 
                 // shift by the number of zeros
-                chunk >>= num_zeros as usize;
+                chunk <<= num_zeros as usize;
                 num_shifts += num_zeros;
 
                 // skip consecutive ones
-                let num_ones = chunk.trailing_ones() as u16;
+                let num_ones = chunk.leading_ones() as u16;
                 if num_ones < BITS_IN_CHUNK {
-                    chunk >>= num_ones;
+                    chunk <<= num_ones;
                 } else {
                     // all ones
                     debug_assert!(chunk == !0);
