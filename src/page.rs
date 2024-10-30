@@ -78,11 +78,13 @@ impl Page {
     pub fn read_value(&self, block_offset: BlockOffset, length: u32) -> (&[u8], usize) {
         let value_start = block_offset as usize * BLOCK_SIZE_BYTES;
 
-        assert!(value_start < self.mmap.len());
+        let mmap_len = self.mmap.len();
+        
+        assert!(value_start < mmap_len);
 
         let value_end = value_start + length as usize;
 
-        let unread_tail = value_end.saturating_sub(self.mmap.len());
+        let unread_tail = value_end.saturating_sub(mmap_len);
 
         // read value region
         (

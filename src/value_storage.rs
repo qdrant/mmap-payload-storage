@@ -152,7 +152,7 @@ impl<V: Value> ValueStorage<V> {
         mut block_offset: BlockOffset,
         mut length: u32,
     ) -> Vec<u8> {
-        let mut raw_sections = vec![];
+        let mut raw_sections = Vec::with_capacity(length as usize);
 
         for page_id in start_page_id.. {
             let page = self.pages.get(&page_id).expect("Page not found");
