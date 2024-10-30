@@ -39,7 +39,7 @@ impl<S> StorageProxy<S> {
 }
 
 impl<S: SequentialCollectionHandle> StorageProxy<S> {
-    const FLUSH_INTERVAL: u32 = 1000;
+    const FLUSH_INTERVAL: u32 = 10000;
 
     fn maybe_flush(&mut self) {
         if self.write_count >= Self::FLUSH_INTERVAL {

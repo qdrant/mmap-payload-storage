@@ -239,6 +239,42 @@ impl Bitmask {
         const BITS_IN_CHUNK: u32 = usize::BITS;
         for (chunk_idx, chunk) in raw_region.iter().enumerate() {
             let mut chunk = *chunk;
+
+            // case of all zeros
+            if chunk == 0 {
+                current_size += BITS_IN_CHUNK;
+                continue;
+            }
+
+            if chunk == !0 {
+                // case of all ones
+                if current_size >= num_blocks {
+                    // bingo - we found a free cell of num_blocks
+                    return Some(translate_local_index(current_start));
+                }
+                current_size = 0;
+                current_start = (chunk_idx as u32 + 1) * BITS_IN_CHUNK;
+                continue;
+            }
+
+            // At least one non-zero bit
+            let leading = chunk.trailing_zeros();
+            let trailing = chunk.leading_zeros();
+
+            let max_possible_middle_gap = (BITS_IN_CHUNK - leading - trailing).saturating_sub(2);
+
+            // Skip looking for local max if it won't improve global max
+            if num_blocks > max_possible_middle_gap {
+                current_size += leading;
+                if current_size >= num_blocks {
+                    // bingo - we found a free cell of num_blocks
+                    return Some(translate_local_index(current_start));
+                }
+                current_size = trailing;
+                current_start = (chunk_idx as u32) * BITS_IN_CHUNK + BITS_IN_CHUNK - trailing;
+                continue;
+            }
+
             while chunk != 0 {
                 let num_zeros = chunk.trailing_zeros();
                 current_size += num_zeros;
@@ -325,27 +361,56 @@ impl Bitmask {
         // Iterate over the integers that compose the bitslice. So that we can perform bitwise operations.
         let mut max = 0;
         let mut current = 0;
-        const BITS_IN_CHUNK: u16 = usize::BITS as u16;
+        const BITS_IN_CHUNK: u32 = usize::BITS;
         let mut num_shifts = 0;
-        for chunk in raw_region {
-            let mut chunk = *chunk;
+        // In reverse, because we expect the regions to be filled start to end.
+        // So starting from the end should give us bigger `max` earlier.
+        for chunk in raw_region.iter().rev() {
+            // Ensure that the chunk is little-endian.
+            let mut chunk = chunk.to_le();
+            // case of all zeros
+            if chunk == 0 {
+                current += BITS_IN_CHUNK;
+                continue;
+            }
+
+            if chunk == !0 {
+                // case of all ones
+                max = max.max(current);
+                current = 0;
+                continue;
+            }
+
+            // At least one non-zero bit
+            let leading = chunk.leading_zeros();
+            let trailing = chunk.trailing_zeros();
+
+            let max_possible_middle_gap = (BITS_IN_CHUNK - leading - trailing).saturating_sub(2);
+
+            // Skip looking for local max if it won't improve global max
+            if max > max_possible_middle_gap {
+                current += leading;
+                max = max.max(current);
+                current = trailing;
+                continue;
+            }
+
+            // Otherwise, look for the actual maximum in the chunk
             while chunk != 0 {
                 // count consecutive zeros
-                let num_zeros = chunk.trailing_zeros() as u16;
+                let num_zeros = chunk.leading_zeros();
                 current += num_zeros;
-                if current > max {
-                    max = current;
-                }
+                max = max.max(current);
                 current = 0;
 
                 // shift by the number of zeros
-                chunk >>= num_zeros as usize;
+                chunk <<= num_zeros as usize;
                 num_shifts += num_zeros;
 
                 // skip consecutive ones
-                let num_ones = chunk.trailing_ones() as u16;
+                let num_ones = chunk.leading_ones();
                 if num_ones < BITS_IN_CHUNK {
-                    chunk >>= num_ones;
+                    chunk <<= num_ones;
                 } else {
                     // all ones
                     debug_assert!(chunk == !0);
@@ -359,13 +424,11 @@ impl Bitmask {
             num_shifts = 0;
         }
 
-        if current > max {
-            max = current;
-        }
+        max = max.max(current);
 
         let leading;
         let trailing;
-        if max == REGION_SIZE_BLOCKS as u16 {
+        if max == REGION_SIZE_BLOCKS as u32 {
             leading = max;
             trailing = max;
         } else {
@@ -373,16 +436,16 @@ impl Bitmask {
                 .iter()
                 .take_while_inclusive(|chunk| chunk == &&0)
                 .map(|chunk| chunk.trailing_zeros())
-                .sum::<u32>() as u16;
+                .sum::<u32>();
             trailing = raw_region
                 .iter()
                 .rev()
                 .take_while_inclusive(|chunk| chunk == &&0)
                 .map(|chunk| chunk.leading_zeros())
-                .sum::<u32>() as u16;
+                .sum::<u32>();
         }
 
-        RegionGaps::new(leading, trailing, max)
+        RegionGaps::new(leading as u16, trailing as u16, max as u16)
     }
 }
 

@@ -79,7 +79,7 @@ impl Page {
         let value_start = block_offset as usize * BLOCK_SIZE_BYTES;
 
         let mmap_len = self.mmap.len();
-        
+
         assert!(value_start < mmap_len);
 
         let value_end = value_start + length as usize;
