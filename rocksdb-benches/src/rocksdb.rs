@@ -105,7 +105,7 @@ impl SequentialCollectionHandle for DB {
         true
     }
 
-    fn flush(&mut self) -> bool {
+    fn flush(&self) -> bool {
         self.flush().is_ok()
     }
 }

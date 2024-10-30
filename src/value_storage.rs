@@ -5,6 +5,7 @@ use crate::utils_copied::mmap_type;
 use crate::value::Value;
 
 use lz4_flex::compress_prepend_size;
+use parking_lot::RwLock;
 use std::path::PathBuf;
 
 /// Expect JSON values to have roughly 3–5 fields with mostly small values.
@@ -19,7 +20,7 @@ pub struct ValueStorage<V> {
     /// Holds mapping from `PointOffset` -> `ValuePointer`
     ///
     /// Stored in a separate file
-    tracker: Tracker,
+    tracker: RwLock<Tracker>,
     /// Page size in bytes when creating new pages, normally 32MB
     pub(super) new_page_size: usize,
     /// Mapping from page_id -> mmap page
@@ -27,7 +28,7 @@ pub struct ValueStorage<V> {
     /// Bitmask to represent which "blocks" of data in the pages are used and which are free.
     ///
     /// 0 is free, 1 is used.
-    bitmask: Bitmask,
+    bitmask: RwLock<Bitmask>,
     /// Path of the directory where the storage files are stored
     base_path: PathBuf,
     _value_type: std::marker::PhantomData<V>,
@@ -47,7 +48,7 @@ impl<V: Value> ValueStorage<V> {
     pub fn files(&self) -> Vec<PathBuf> {
         let mut paths = Vec::with_capacity(self.pages.len() + 1);
         // page tracker file
-        for tracker_file in self.tracker.files() {
+        for tracker_file in self.tracker.read().files() {
             paths.push(tracker_file);
         }
         // pages files
@@ -55,7 +56,7 @@ impl<V: Value> ValueStorage<V> {
             paths.push(self.page_path(page_id));
         }
         // bitmask files
-        for bitmask_file in self.bitmask.files() {
+        for bitmask_file in self.bitmask.read().files() {
             paths.push(bitmask_file);
         }
         paths
@@ -74,10 +75,10 @@ impl<V: Value> ValueStorage<V> {
         assert!(base_path.is_dir(), "Base path is not a directory");
         let page_size = page_size.unwrap_or(PAGE_SIZE_BYTES);
         let mut storage = Self {
-            tracker: Tracker::new(&base_path, None),
+            tracker: RwLock::new(Tracker::new(&base_path, None)),
             new_page_size: page_size,
             pages: Default::default(),
-            bitmask: Bitmask::create(&base_path, page_size),
+            bitmask: RwLock::new(Bitmask::create(&base_path, page_size)),
             base_path,
             _value_type: std::marker::PhantomData,
         };
@@ -104,10 +105,10 @@ impl<V: Value> ValueStorage<V> {
 
         // load pages
         let mut storage = Self {
-            tracker: page_tracker,
+            tracker: RwLock::new(page_tracker),
             new_page_size,
             pages: Default::default(),
-            bitmask,
+            bitmask: RwLock::new(bitmask),
             base_path: path.clone(),
             _value_type: std::marker::PhantomData,
         };
@@ -175,24 +176,28 @@ impl<V: Value> ValueStorage<V> {
         let page = Page::new(&path, self.new_page_size);
         self.pages.push(page);
 
-        self.bitmask.cover_new_page();
+        self.bitmask.write().cover_new_page();
 
         new_page_id
     }
 
     /// Get the mapping for a given point offset
     fn get_pointer(&self, point_offset: PointOffset) -> Option<ValuePointer> {
-        self.tracker.get(point_offset)
+        self.tracker.read().get(point_offset)
     }
 
     fn find_or_create_available_blocks(&mut self, num_blocks: u32) -> (PageId, BlockOffset) {
         debug_assert!(num_blocks > 0, "num_blocks must be greater than 0");
 
-        if let Some((page_id, block_offset)) = self.bitmask.find_available_blocks(num_blocks) {
+        let bitmask_guard = self.bitmask.read();
+        if let Some((page_id, block_offset)) = bitmask_guard.find_available_blocks(num_blocks) {
             return (page_id, block_offset);
         }
         // else we need new page(s)
-        let trailing_free_blocks = self.bitmask.trailing_free_blocks();
+        let trailing_free_blocks = bitmask_guard.trailing_free_blocks();
+
+        // release the lock before creating new pages
+        drop(bitmask_guard);
 
         let missing_blocks = num_blocks.saturating_sub(trailing_free_blocks) as usize;
 
@@ -202,7 +207,10 @@ impl<V: Value> ValueStorage<V> {
         }
 
         // At this point we are sure that we have enough free pages to allocate the blocks
-        self.bitmask.find_available_blocks(num_blocks).unwrap()
+        self.bitmask
+            .read()
+            .find_available_blocks(num_blocks)
+            .unwrap()
     }
 
     /// Write value into a new cell, considering that it can span more than one page
@@ -295,11 +303,12 @@ impl<V: Value> ValueStorage<V> {
 
         // mark new cell as used in the bitmask
         self.bitmask
+            .write()
             .mark_blocks(start_page_id, block_offset, required_blocks, true);
 
         // update the pointer
-        let is_update = self.tracker.has_pointer(point_offset);
-        self.tracker.update(
+        let is_update = self.tracker.read().has_pointer(point_offset);
+        self.tracker.write().update(
             point_offset,
             ValuePointer::new(start_page_id, block_offset, value_size as u32),
         );
@@ -324,10 +333,10 @@ impl<V: Value> ValueStorage<V> {
         let value = V::from_bytes(&decompressed);
 
         // delete mapping
-        self.tracker.unset(point_offset);
+        self.tracker.write().unset(point_offset);
 
         // mark cell as available in the bitmask
-        self.bitmask.mark_blocks(
+        self.bitmask.write().mark_blocks(
             page_id,
             block_offset,
             Self::blocks_for_value(length as usize),
@@ -350,7 +359,7 @@ impl<V: Value> ValueStorage<V> {
     where
         F: FnMut(PointOffset, &V) -> std::io::Result<bool>,
     {
-        for pointer in self.tracker.iter_pointers().flatten() {
+        for pointer in self.tracker.read().iter_pointers().flatten() {
             let ValuePointer {
                 page_id,
                 block_offset,
@@ -375,24 +384,27 @@ impl<V> ValueStorage<V> {
     }
 
     /// Flush all mmaps and pending updates to disk
-    pub fn flush(&mut self) -> Result<(), mmap_type::Error> {
-        self.bitmask.flush()?;
+    pub fn flush(&self) -> Result<(), mmap_type::Error> {
+        let mut bitmask_guard = self.bitmask.upgradable_read();
+        bitmask_guard.flush()?;
         for page in &self.pages {
             page.flush()?;
         }
-        let old_pointers = self.tracker.write_pending_and_flush()?;
+        let old_pointers = self.tracker.write().write_pending_and_flush()?;
 
         // update all free blocks in the bitmask
-        for pointer in old_pointers {
-            // TODO: mark in batch? so that we update the gaps less times.
-            self.bitmask.mark_blocks(
-                pointer.page_id,
-                pointer.block_offset,
-                Self::blocks_for_value(pointer.length as usize),
-                false,
-            );
-        }
-        self.bitmask.flush()?;
+        bitmask_guard.with_upgraded(|guard| {
+            for pointer in old_pointers {
+                // TODO: mark in batch? so that we update the gaps less times.
+                guard.mark_blocks(
+                    pointer.page_id,
+                    pointer.block_offset,
+                    Self::blocks_for_value(pointer.length as usize),
+                    false,
+                );
+            }
+        });
+        bitmask_guard.flush()?;
 
         Ok(())
     }
@@ -433,7 +445,7 @@ mod tests {
         let payload = Payload::default();
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.read().mapping_len(), 1);
 
         let stored_payload = storage.get_value(0);
         assert!(stored_payload.is_some());
@@ -452,7 +464,7 @@ mod tests {
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.read().mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 0); // first page
@@ -475,7 +487,7 @@ mod tests {
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.read().mapping_len(), 1);
         let files = storage.files();
         assert_eq!(files.len(), 4, "Expected 4 files, got {:?}", files);
         assert_eq!(files[0].file_name().unwrap(), "tracker.dat");
@@ -553,7 +565,7 @@ mod tests {
 
         storage.put_value(0, &payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.read().mapping_len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
         assert_eq!(page_mapping.page_id, 0); // first page
@@ -572,7 +584,7 @@ mod tests {
 
         storage.put_value(0, &updated_payload);
         assert_eq!(storage.pages.len(), 1);
-        assert_eq!(storage.tracker.mapping_len(), 1);
+        assert_eq!(storage.tracker.read().mapping_len(), 1);
 
         let stored_payload = storage.get_value(0);
         assert!(stored_payload.is_some());
@@ -668,7 +680,7 @@ mod tests {
         }
 
         // asset same length
-        assert_eq!(storage.tracker.mapping_len(), model_hashmap.len());
+        assert_eq!(storage.tracker.read().mapping_len(), model_hashmap.len());
 
         // validate storage and model_hashmap are the same
         for point_offset in 0..=max_point_offset {
@@ -685,7 +697,7 @@ mod tests {
             ValueStorage::<Payload>::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
 
         // asset same length
-        assert_eq!(storage.tracker.mapping_len(), model_hashmap.len());
+        assert_eq!(storage.tracker.read().mapping_len(), model_hashmap.len());
 
         // validate storage and model_hashmap are the same
         for point_offset in 0..=max_point_offset {
@@ -729,7 +741,7 @@ mod tests {
 
         {
             // the fitting page should be 64MB, so we should still have about 14MB of free space
-            let free_blocks = storage.bitmask.free_blocks_for_page(1);
+            let free_blocks = storage.bitmask.read().free_blocks_for_page(1);
             let min_expected = 1024 * 1024 * 13 / BLOCK_SIZE_BYTES;
             let max_expected = 1024 * 1024 * 15 / BLOCK_SIZE_BYTES;
             assert!((min_expected..max_expected).contains(&free_blocks));
@@ -841,13 +853,13 @@ mod tests {
         // load data into storage
         let point_offset = write_data(&mut storage, 0);
         assert_eq!(point_offset, EXPECTED_LEN as u32);
-        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN);
+        assert_eq!(storage.tracker.read().mapping_len(), EXPECTED_LEN);
         assert_eq!(storage.pages.len(), 2);
 
         // write the same payload a second time
         let point_offset = write_data(&mut storage, point_offset);
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
-        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.tracker.read().mapping_len(), EXPECTED_LEN * 2);
         assert_eq!(storage.pages.len(), 4);
 
         // assert storage is consistent
@@ -860,7 +872,7 @@ mod tests {
         let mut storage = ValueStorage::open(dir.path().to_path_buf(), None).unwrap();
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 4);
-        assert_eq!(storage.tracker.mapping_len(), EXPECTED_LEN * 2);
+        assert_eq!(storage.tracker.read().mapping_len(), EXPECTED_LEN * 2);
 
         // assert storage is consistent after reopening
         storage_double_pass_is_consistent(&storage, 0);

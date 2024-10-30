@@ -122,7 +122,7 @@ pub trait SequentialCollectionHandle {
 
     fn update(&mut self, key: &u32, payload: &Payload) -> bool;
 
-    fn flush(&mut self) -> bool;
+    fn flush(&self) -> bool;
 }
 
 pub struct PayloadPicker {
