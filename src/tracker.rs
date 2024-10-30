@@ -3,6 +3,7 @@ use crate::utils_copied::mmap_ops::{
     create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8,
 };
 use memmap2::MmapMut;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub type PointOffset = u32;
@@ -46,6 +47,10 @@ pub struct Tracker {
     header: TrackerHeader,
     /// Mmap of the file
     mmap: MmapMut,
+    /// Updates that haven't been flushed
+    ///
+    /// When flushing, these updates get written into the mmap and flushed at once.
+    pending_updates: HashMap<PointOffset, ValuePointer>,
 }
 
 impl Tracker {
@@ -70,7 +75,13 @@ impl Tracker {
         let mmap = open_write_mmap(&path, AdviceSetting::from(TRACKER_MEM_ADVICE), false)
             .expect("Failed to open page tracker mmap");
         let header = TrackerHeader::default();
-        let mut page_tracker = Self { path, header, mmap };
+        let pending_updates = HashMap::new();
+        let mut page_tracker = Self {
+            path,
+            header,
+            mmap,
+            pending_updates,
+        };
         page_tracker.write_header();
         page_tracker
     }
@@ -84,15 +95,34 @@ impl Tracker {
         }
         let mmap = open_write_mmap(&path, AdviceSetting::from(TRACKER_MEM_ADVICE), false).unwrap();
         let header: &TrackerHeader = transmute_from_u8(&mmap[0..size_of::<TrackerHeader>()]);
+        let pending_updates = HashMap::new();
         Some(Self {
             path,
             header: header.clone(),
             mmap,
+            pending_updates,
         })
     }
 
-    pub fn flush(&self) -> std::io::Result<()> {
-        self.mmap.flush()
+    /// Writes the accumulated pending updates to mmap and flushes it.
+    ///
+    /// Returns the old pointers that were overwritten, so that they can be freed in the bitmask.
+    #[must_use = "The old pointers need to be freed in the bitmask"]
+    pub fn write_pending_and_flush(&mut self) -> std::io::Result<Vec<ValuePointer>> {
+        // Write pending updates from memory
+        let mut pending_updates = std::mem::take(&mut self.pending_updates);
+        let mut old_pointers = Vec::new();
+        for (point_offset, pointer) in pending_updates.drain() {
+            if let Some(old_pointer) = self.get_raw(point_offset).and_then(|pointer| *pointer) {
+                old_pointers.push(old_pointer);
+            }
+            self.set(point_offset, pointer);
+        }
+
+        // Flush the mmap
+        self.mmap.flush()?;
+
+        Ok(old_pointers)
     }
 
     /// Return the size of the underlying mmaped file
@@ -121,7 +151,7 @@ impl Tracker {
         // check if file is long enough
         if self.mmap.len() < end_offset {
             // flush the current mmap
-            self.flush().unwrap();
+            self.mmap.flush().unwrap();
             let missing_space = end_offset - self.mmap.len();
             // reopen the file with a larger size
             // account for missing size + extra to avoid resizing too often
@@ -142,16 +172,22 @@ impl Tracker {
     /// Excludes None values
     #[cfg(test)]
     pub fn mapping_len(&self) -> usize {
-        (0..self.header.max_point_offset)
-            .filter(|&i| {
-                let start_offset =
-                    size_of::<TrackerHeader>() + i as usize * size_of::<Option<ValuePointer>>();
-                let end_offset = start_offset + size_of::<Option<ValuePointer>>();
-                let page_pointer: &Option<ValuePointer> =
-                    transmute_from_u8(&self.mmap[start_offset..end_offset]);
-                page_pointer.is_some()
-            })
-            .count()
+        use std::collections::HashSet;
+
+        let mut pending: HashSet<_> = self.pending_updates.keys().copied().collect();
+
+        let persisted = (0..self.header.max_point_offset).filter_map(|i| {
+            let start_offset =
+                size_of::<TrackerHeader>() + i as usize * size_of::<Option<ValuePointer>>();
+            let end_offset = start_offset + size_of::<Option<ValuePointer>>();
+            let page_pointer: &Option<ValuePointer> =
+                transmute_from_u8(&self.mmap[start_offset..end_offset]);
+            page_pointer.is_some().then_some(i as PointOffset)
+        });
+
+        pending.extend(persisted);
+
+        pending.len()
     }
 
     /// Iterate over the pointers in the tracker
@@ -173,7 +209,10 @@ impl Tracker {
 
     /// Get the page pointer at the given point offset
     pub fn get(&self, point_offset: PointOffset) -> Option<ValuePointer> {
-        self.get_raw(point_offset).and_then(|pointer| *pointer)
+        self.pending_updates
+            .get(&point_offset)
+            .copied()
+            .or_else(|| self.get_raw(point_offset).and_then(|pointer| *pointer))
     }
 
     /// Increment the header count if the given point offset is larger than the current count
@@ -184,9 +223,17 @@ impl Tracker {
         }
     }
 
+    pub fn has_pointer(&self, point_offset: PointOffset) -> bool {
+        self.pending_updates.contains_key(&point_offset) || self.get(point_offset).is_some()
+    }
+
+    pub fn update(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
+        self.pending_updates.insert(point_offset, value_pointer);
+    }
+
     /// Set value at the given point offset
     /// If the point offset is larger than the current length, the mapping is resized
-    pub fn set(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
+    fn set(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
         // save mapping to mmap
         self.persist_pointer(point_offset, Some(value_pointer));
         // increment header count if necessary
@@ -194,6 +241,7 @@ impl Tracker {
     }
 
     pub fn unset(&mut self, point_offset: PointOffset) {
+        self.pending_updates.remove(&point_offset);
         if (point_offset as usize) < self.mmap.len() {
             // save mapping to mmap
             self.persist_pointer(point_offset, None);

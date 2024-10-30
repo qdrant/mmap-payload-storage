@@ -185,11 +185,6 @@ impl<V: Value> ValueStorage<V> {
         self.tracker.get(point_offset)
     }
 
-    /// The number of blocks needed for a given value bytes size
-    fn blocks_for_value(value_size: usize) -> u32 {
-        value_size.div_ceil(BLOCK_SIZE_BYTES).try_into().unwrap()
-    }
-
     fn find_or_create_available_blocks(&mut self, num_blocks: u32) -> (PageId, BlockOffset) {
         debug_assert!(num_blocks > 0, "num_blocks must be greater than 0");
 
@@ -259,24 +254,14 @@ impl<V: Value> ValueStorage<V> {
             .mark_blocks(start_page_id, block_offset, required_blocks, true);
 
         // update the pointer
-        let old_pointer_opt = self.get_pointer(point_offset);
-        self.tracker.set(
+        let is_update = self.tracker.has_pointer(point_offset);
+        self.tracker.update(
             point_offset,
             ValuePointer::new(start_page_id, block_offset, value_size as u32),
         );
 
-        // Check if it is an update.
-        if let Some(old_pointer) = old_pointer_opt {
-            // mark old cell as available in the bitmask
-            self.bitmask.mark_blocks(
-                old_pointer.page_id,
-                old_pointer.block_offset,
-                Self::blocks_for_value(old_pointer.length as usize),
-                false,
-            );
-        }
         // return whether it was an update or not
-        old_pointer_opt.is_some()
+        is_update
     }
 
     /// Delete a value from the storage
@@ -316,16 +301,6 @@ impl<V: Value> ValueStorage<V> {
         std::fs::remove_dir_all(&self.base_path).unwrap();
     }
 
-    /// Flush all mmap pages to disk
-    pub fn flush(&self) -> Result<(), mmap_type::Error> {
-        self.tracker.flush()?;
-        for page in &self.pages {
-            page.flush()?;
-        }
-        self.bitmask.flush()?;
-        Ok(())
-    }
-
     /// Iterate over all the values in the storage
     pub fn iter<F>(&self, mut callback: F) -> std::io::Result<()>
     where
@@ -346,6 +321,42 @@ impl<V: Value> ValueStorage<V> {
             }
         }
         Ok(())
+    }
+}
+
+impl<V> ValueStorage<V> {
+    /// The number of blocks needed for a given value bytes size
+    fn blocks_for_value(value_size: usize) -> u32 {
+        value_size.div_ceil(BLOCK_SIZE_BYTES).try_into().unwrap()
+    }
+
+    /// Flush all mmaps and pending updates to disk
+    pub fn flush(&mut self) -> Result<(), mmap_type::Error> {
+        self.bitmask.flush()?;
+        for page in &self.pages {
+            page.flush()?;
+        }
+        let old_pointers = self.tracker.write_pending_and_flush()?;
+
+        // update all free blocks in the bitmask
+        for pointer in old_pointers {
+            // TODO: mark in batch? so that we update the gaps less times.
+            self.bitmask.mark_blocks(
+                pointer.page_id,
+                pointer.block_offset,
+                Self::blocks_for_value(pointer.length as usize),
+                false,
+            );
+        }
+        self.bitmask.flush()?;
+
+        Ok(())
+    }
+}
+
+impl<V> Drop for ValueStorage<V> {
+    fn drop(&mut self) {
+        self.flush().unwrap();
     }
 }
 
