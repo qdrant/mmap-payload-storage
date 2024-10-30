@@ -361,7 +361,7 @@ impl Bitmask {
         // Iterate over the integers that compose the bitslice. So that we can perform bitwise operations.
         let mut max = 0;
         let mut current = 0;
-        const BITS_IN_CHUNK: u16 = usize::BITS as u16;
+        const BITS_IN_CHUNK: u32 = usize::BITS;
         let mut num_shifts = 0;
         // In reverse, because we expect the regions to be filled start to end.
         // So starting from the end should give us bigger `max` earlier.
@@ -382,8 +382,8 @@ impl Bitmask {
             }
 
             // At least one non-zero bit
-            let leading = chunk.leading_zeros() as u16;
-            let trailing = chunk.trailing_zeros() as u16;
+            let leading = chunk.leading_zeros();
+            let trailing = chunk.trailing_zeros();
 
             let max_possible_middle_gap = (BITS_IN_CHUNK - leading - trailing).saturating_sub(2);
 
@@ -398,7 +398,7 @@ impl Bitmask {
             // Otherwise, look for the actual maximum in the chunk
             while chunk != 0 {
                 // count consecutive zeros
-                let num_zeros = chunk.leading_zeros() as u16;
+                let num_zeros = chunk.leading_zeros();
                 current += num_zeros;
                 max = max.max(current);
                 current = 0;
@@ -408,7 +408,7 @@ impl Bitmask {
                 num_shifts += num_zeros;
 
                 // skip consecutive ones
-                let num_ones = chunk.leading_ones() as u16;
+                let num_ones = chunk.leading_ones();
                 if num_ones < BITS_IN_CHUNK {
                     chunk <<= num_ones;
                 } else {
@@ -428,7 +428,7 @@ impl Bitmask {
 
         let leading;
         let trailing;
-        if max == REGION_SIZE_BLOCKS as u16 {
+        if max == REGION_SIZE_BLOCKS as u32 {
             leading = max;
             trailing = max;
         } else {
@@ -436,16 +436,16 @@ impl Bitmask {
                 .iter()
                 .take_while_inclusive(|chunk| chunk == &&0)
                 .map(|chunk| chunk.trailing_zeros())
-                .sum::<u32>() as u16;
+                .sum::<u32>();
             trailing = raw_region
                 .iter()
                 .rev()
                 .take_while_inclusive(|chunk| chunk == &&0)
                 .map(|chunk| chunk.leading_zeros())
-                .sum::<u32>() as u16;
+                .sum::<u32>();
         }
 
-        RegionGaps::new(leading, trailing, max)
+        RegionGaps::new(leading as u16, trailing as u16, max as u16)
     }
 }
 
