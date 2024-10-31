@@ -60,7 +60,7 @@ impl PointerUpdate {
 
 #[derive(Debug, Default, Clone)]
 struct TrackerHeader {
-    max_point_offset: u32,
+    next_pointer_offset: u32,
 }
 
 #[derive(Debug)]
@@ -75,6 +75,9 @@ pub struct Tracker {
     ///
     /// When flushing, these updates get written into the mmap and flushed at once.
     pending_updates: HashMap<PointOffset, PointerUpdate>,
+
+    /// The maximum pointer offset in the tracker (updated in memory).
+    next_pointer_offset: PointOffset,
 }
 
 impl Tracker {
@@ -105,6 +108,7 @@ impl Tracker {
             header,
             mmap,
             pending_updates,
+            next_pointer_offset: 0,
         };
         page_tracker.write_header();
         page_tracker
@@ -121,6 +125,7 @@ impl Tracker {
         let header: &TrackerHeader = transmute_from_u8(&mmap[0..size_of::<TrackerHeader>()]);
         let pending_updates = HashMap::new();
         Some(Self {
+            next_pointer_offset: header.next_pointer_offset,
             path,
             header: header.clone(),
             mmap,
@@ -155,6 +160,8 @@ impl Tracker {
                 }
             }
         }
+        // increment header count if necessary
+        self.persist_pointer_count();
 
         // Flush the mmap
         self.mmap.flush()?;
@@ -169,8 +176,8 @@ impl Tracker {
     }
 
     #[cfg(test)]
-    pub fn header_count(&self) -> u32 {
-        self.header.max_point_offset
+    pub fn pointer_count(&self) -> u32 {
+        self.header.next_pointer_offset
     }
 
     /// Write the current page header to the memory map
@@ -202,9 +209,6 @@ impl Tracker {
                 .unwrap();
         }
         self.mmap[start_offset..end_offset].copy_from_slice(transmute_to_u8(&pointer));
-
-        // increment header count if necessary
-        self.increment_max_point_offset(point_offset as PointOffset);
     }
 
     #[cfg(test)]
@@ -224,7 +228,7 @@ impl Tracker {
             .filter_map(|(k, v)| v.is_set().then_some(*k))
             .collect();
 
-        let persisted = (0..self.header.max_point_offset).filter_map(|i| {
+        let persisted = (0..self.header.next_pointer_offset).filter_map(|i| {
             let start_offset =
                 size_of::<TrackerHeader>() + i as usize * size_of::<Option<ValuePointer>>();
             let end_offset = start_offset + size_of::<Option<ValuePointer>>();
@@ -240,7 +244,7 @@ impl Tracker {
 
     /// Iterate over the pointers in the tracker
     pub fn iter_pointers(&self) -> impl Iterator<Item = Option<ValuePointer>> + '_ {
-        (0..self.header.max_point_offset).map(move |i| self.get(i as PointOffset))
+        (0..self.next_pointer_offset).map(move |i| self.get(i as PointOffset))
     }
 
     /// Get the raw value at the given point offset
@@ -266,11 +270,9 @@ impl Tracker {
     }
 
     /// Increment the header count if the given point offset is larger than the current count
-    fn increment_max_point_offset(&mut self, point_offset: PointOffset) {
-        if point_offset >= self.header.max_point_offset {
-            self.header.max_point_offset = point_offset + 1;
-            self.write_header();
-        }
+    fn persist_pointer_count(&mut self) {
+        self.header.next_pointer_offset = self.next_pointer_offset;
+        self.write_header();
     }
 
     pub fn has_pointer(&self, point_offset: PointOffset) -> bool {
@@ -280,6 +282,7 @@ impl Tracker {
     pub fn set(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
         self.pending_updates
             .insert(point_offset, PointerUpdate::Set(value_pointer));
+        self.next_pointer_offset = self.next_pointer_offset.max(point_offset + 1);
     }
 
     /// Unset the value at the given point offset and return its previous value
@@ -325,7 +328,7 @@ mod tests {
         let tracker = Tracker::new(path, None);
         assert!(tracker.is_empty());
         assert_eq!(tracker.mapping_len(), 0);
-        assert_eq!(tracker.header_count(), 0);
+        assert_eq!(tracker.pointer_count(), 0);
     }
 
     #[rstest]
@@ -348,7 +351,7 @@ mod tests {
 
         tracker.write_pending_and_flush().unwrap();
 
-        assert_eq!(tracker.header_count(), 101);
+        assert_eq!(tracker.pointer_count(), 101);
         assert_eq!(tracker.mapping_len(), 2);
     }
 
@@ -368,7 +371,7 @@ mod tests {
         tracker.write_pending_and_flush().unwrap();
         assert!(!tracker.is_empty());
         assert_eq!(tracker.mapping_len(), 4);
-        assert_eq!(tracker.header_count(), 11); // accounts for empty slots
+        assert_eq!(tracker.pointer_count(), 11); // accounts for empty slots
 
         assert_eq!(tracker.get_raw(0), Some(&Some(ValuePointer::new(1, 1, 1))));
         assert_eq!(tracker.get_raw(1), Some(&Some(ValuePointer::new(2, 2, 2))));
@@ -389,7 +392,7 @@ mod tests {
         assert_eq!(tracker.get(1), None);
 
         assert_eq!(tracker.mapping_len(), 3);
-        assert_eq!(tracker.header_count(), 11);
+        assert_eq!(tracker.pointer_count(), 11);
 
         // overwrite some values
         tracker.set(0, ValuePointer::new(10, 10, 10));
@@ -422,7 +425,7 @@ mod tests {
         tracker.write_pending_and_flush().unwrap();
 
         assert_eq!(tracker.mapping_len(), value_count / 2);
-        assert_eq!(tracker.header_count(), value_count as u32 - 1);
+        assert_eq!(tracker.pointer_count(), value_count as u32 - 1);
 
         // drop the tracker
         drop(tracker);
@@ -430,7 +433,7 @@ mod tests {
         // reopen the tracker
         let tracker = Tracker::open(path).unwrap();
         assert_eq!(tracker.mapping_len(), value_count / 2);
-        assert_eq!(tracker.header_count(), value_count as u32 - 1);
+        assert_eq!(tracker.pointer_count(), value_count as u32 - 1);
 
         // check the values
         for i in 0..value_count {
