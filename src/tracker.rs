@@ -34,6 +34,30 @@ impl ValuePointer {
     }
 }
 
+#[derive(Debug)]
+enum PointerUpdate {
+    Set(ValuePointer),
+    Unset(ValuePointer),
+}
+
+impl PointerUpdate {
+    #[cfg(test)]
+    fn is_set(&self) -> bool {
+        match self {
+            PointerUpdate::Set(_) => true,
+            PointerUpdate::Unset(_) => false,
+        }
+    }
+
+    /// Set is Some, Unset is None
+    fn to_option(&self) -> Option<ValuePointer> {
+        match self {
+            PointerUpdate::Set(pointer) => Some(*pointer),
+            PointerUpdate::Unset(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct TrackerHeader {
     max_point_offset: u32,
@@ -50,7 +74,7 @@ pub struct Tracker {
     /// Updates that haven't been flushed
     ///
     /// When flushing, these updates get written into the mmap and flushed at once.
-    pending_updates: HashMap<PointOffset, Option<ValuePointer>>,
+    pending_updates: HashMap<PointOffset, PointerUpdate>,
 }
 
 impl Tracker {
@@ -112,13 +136,24 @@ impl Tracker {
         // Write pending updates from memory
         let mut pending_updates = std::mem::take(&mut self.pending_updates);
         let mut old_pointers = Vec::new();
-        for (point_offset, pointer) in pending_updates.drain() {
-            if let Some(old_pointer) = self.get_raw(point_offset).and_then(|pointer| *pointer) {
-                old_pointers.push(old_pointer);
-            }
+        for (point_offset, update) in pending_updates.drain() {
+            match update {
+                PointerUpdate::Set(new_pointer) => {
+                    if let Some(old_pointer) =
+                        self.get_raw(point_offset).and_then(|pointer| *pointer)
+                    {
+                        old_pointers.push(old_pointer);
+                    }
 
-            // write the new pointer
-            self.persist_pointer(point_offset, pointer);
+                    // write the new pointer
+                    self.persist_pointer(point_offset, Some(new_pointer));
+                }
+                PointerUpdate::Unset(old_pointer) => {
+                    old_pointers.push(old_pointer);
+                    // write the new pointer
+                    self.persist_pointer(point_offset, None);
+                }
+            }
         }
 
         // Flush the mmap
@@ -186,7 +221,7 @@ impl Tracker {
         let mut pending: HashSet<_> = self
             .pending_updates
             .iter()
-            .filter_map(|(k, v)| v.is_some().then_some(*k))
+            .filter_map(|(k, v)| v.is_set().then_some(*k))
             .collect();
 
         let persisted = (0..self.header.max_point_offset).filter_map(|i| {
@@ -224,7 +259,7 @@ impl Tracker {
     pub fn get(&self, point_offset: PointOffset) -> Option<ValuePointer> {
         self.pending_updates
             .get(&point_offset)
-            .copied()
+            .map(PointerUpdate::to_option)
             // if the value is not in the pending updates, check the mmap
             .or_else(|| self.get_raw(point_offset).copied())
             .flatten()
@@ -244,11 +279,18 @@ impl Tracker {
 
     pub fn set(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
         self.pending_updates
-            .insert(point_offset, Some(value_pointer));
+            .insert(point_offset, PointerUpdate::Set(value_pointer));
     }
 
-    pub fn unset(&mut self, point_offset: PointOffset) {
-        self.pending_updates.insert(point_offset, None);
+    /// Unset the value at the given point offset and return its previous value
+    pub fn unset(&mut self, point_offset: PointOffset) -> Option<ValuePointer> {
+        let pointer_opt = self.get(point_offset);
+        if let Some(pointer) = pointer_opt {
+            self.pending_updates
+                .insert(point_offset, PointerUpdate::Unset(pointer));
+        }
+
+        pointer_opt
     }
 }
 

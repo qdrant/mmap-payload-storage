@@ -327,21 +327,10 @@ impl<V: Value> ValueStorage<V> {
             page_id,
             block_offset,
             length,
-        } = self.get_pointer(point_offset)?;
+        } = self.tracker.write().unset(point_offset)?;
         let raw = self.read_from_pages(page_id, block_offset, length);
         let decompressed = Self::decompress(&raw);
         let value = V::from_bytes(&decompressed);
-
-        // delete mapping
-        self.tracker.write().unset(point_offset);
-
-        // mark cell as available in the bitmask
-        self.bitmask.write().mark_blocks(
-            page_id,
-            block_offset,
-            Self::blocks_for_value(length as usize),
-            false,
-        );
 
         Some(value)
     }
