@@ -308,7 +308,7 @@ impl<V: Value> ValueStorage<V> {
 
         // update the pointer
         let is_update = self.tracker.read().has_pointer(point_offset);
-        self.tracker.write().update(
+        self.tracker.write().set(
             point_offset,
             ValuePointer::new(start_page_id, block_offset, value_size as u32),
         );

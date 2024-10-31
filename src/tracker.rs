@@ -50,7 +50,7 @@ pub struct Tracker {
     /// Updates that haven't been flushed
     ///
     /// When flushing, these updates get written into the mmap and flushed at once.
-    pending_updates: HashMap<PointOffset, ValuePointer>,
+    pending_updates: HashMap<PointOffset, Option<ValuePointer>>,
 }
 
 impl Tracker {
@@ -116,7 +116,9 @@ impl Tracker {
             if let Some(old_pointer) = self.get_raw(point_offset).and_then(|pointer| *pointer) {
                 old_pointers.push(old_pointer);
             }
-            self.set(point_offset, pointer);
+
+            // write the new pointer
+            self.persist_pointer(point_offset, pointer);
         }
 
         // Flush the mmap
@@ -144,6 +146,10 @@ impl Tracker {
     /// Save the mapping at the given offset
     /// The file is resized if necessary
     fn persist_pointer(&mut self, point_offset: PointOffset, pointer: Option<ValuePointer>) {
+        if pointer.is_none() && point_offset as usize >= self.mmap.len() {
+            return;
+        }
+
         let point_offset = point_offset as usize;
         let start_offset =
             size_of::<TrackerHeader>() + point_offset * size_of::<Option<ValuePointer>>();
@@ -161,6 +167,9 @@ impl Tracker {
                 .unwrap();
         }
         self.mmap[start_offset..end_offset].copy_from_slice(transmute_to_u8(&pointer));
+
+        // increment header count if necessary
+        self.increment_max_point_offset(point_offset as PointOffset);
     }
 
     #[cfg(test)]
@@ -174,7 +183,11 @@ impl Tracker {
     pub fn mapping_len(&self) -> usize {
         use std::collections::HashSet;
 
-        let mut pending: HashSet<_> = self.pending_updates.keys().copied().collect();
+        let mut pending: HashSet<_> = self
+            .pending_updates
+            .iter()
+            .filter_map(|(k, v)| v.is_some().then_some(*k))
+            .collect();
 
         let persisted = (0..self.header.max_point_offset).filter_map(|i| {
             let start_offset =
@@ -212,7 +225,9 @@ impl Tracker {
         self.pending_updates
             .get(&point_offset)
             .copied()
-            .or_else(|| self.get_raw(point_offset).and_then(|pointer| *pointer))
+            // if the value is not in the pending updates, check the mmap
+            .or_else(|| self.get_raw(point_offset).copied())
+            .flatten()
     }
 
     /// Increment the header count if the given point offset is larger than the current count
@@ -227,25 +242,13 @@ impl Tracker {
         self.pending_updates.contains_key(&point_offset) || self.get(point_offset).is_some()
     }
 
-    pub fn update(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
-        self.pending_updates.insert(point_offset, value_pointer);
-    }
-
-    /// Set value at the given point offset
-    /// If the point offset is larger than the current length, the mapping is resized
-    fn set(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
-        // save mapping to mmap
-        self.persist_pointer(point_offset, Some(value_pointer));
-        // increment header count if necessary
-        self.increment_max_point_offset(point_offset);
+    pub fn set(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
+        self.pending_updates
+            .insert(point_offset, Some(value_pointer));
     }
 
     pub fn unset(&mut self, point_offset: PointOffset) {
-        self.pending_updates.remove(&point_offset);
-        if (point_offset as usize) < self.mmap.len() {
-            // save mapping to mmap
-            self.persist_pointer(point_offset, None);
-        }
+        self.pending_updates.insert(point_offset, None);
     }
 }
 
@@ -294,10 +297,15 @@ mod tests {
         assert!(tracker.is_empty());
         tracker.set(0, ValuePointer::new(1, 1, 1));
 
+        tracker.write_pending_and_flush().unwrap();
+
         assert!(!tracker.is_empty());
         assert_eq!(tracker.mapping_len(), 1);
 
         tracker.set(100, ValuePointer::new(2, 2, 2));
+
+        tracker.write_pending_and_flush().unwrap();
+
         assert_eq!(tracker.header_count(), 101);
         assert_eq!(tracker.mapping_len(), 2);
     }
@@ -315,6 +323,7 @@ mod tests {
         tracker.set(2, ValuePointer::new(3, 3, 3));
         tracker.set(10, ValuePointer::new(10, 10, 10));
 
+        tracker.write_pending_and_flush().unwrap();
         assert!(!tracker.is_empty());
         assert_eq!(tracker.mapping_len(), 4);
         assert_eq!(tracker.header_count(), 11); // accounts for empty slots
@@ -330,6 +339,9 @@ mod tests {
         assert_eq!(tracker.get_raw(100_000), None); // out of bounds
 
         tracker.unset(1);
+
+        tracker.write_pending_and_flush().unwrap();
+
         // the value has been cleared but the entry is still there
         assert_eq!(tracker.get_raw(1), Some(&None));
         assert_eq!(tracker.get(1), None);
@@ -340,6 +352,8 @@ mod tests {
         // overwrite some values
         tracker.set(0, ValuePointer::new(10, 10, 10));
         tracker.set(2, ValuePointer::new(30, 30, 30));
+
+        tracker.write_pending_and_flush().unwrap();
 
         assert_eq!(tracker.get(0), Some(ValuePointer::new(10, 10, 10)));
         assert_eq!(tracker.get(2), Some(ValuePointer::new(30, 30, 30)));
@@ -363,6 +377,7 @@ mod tests {
                 tracker.set(i as u32, ValuePointer::new(i as u32, i as u32, i as u32));
             }
         }
+        tracker.write_pending_and_flush().unwrap();
 
         assert_eq!(tracker.mapping_len(), value_count / 2);
         assert_eq!(tracker.header_count(), value_count as u32 - 1);
@@ -403,6 +418,9 @@ mod tests {
         for i in 0..100_000 {
             tracker.set(i, ValuePointer::new(i, i, i));
         }
+
+        tracker.write_pending_and_flush().unwrap();
+
         assert_eq!(tracker.mapping_len(), 100_000);
         assert!(tracker.mmap_file_size() > initial_tracker_size);
     }
