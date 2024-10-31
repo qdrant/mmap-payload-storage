@@ -349,7 +349,7 @@ impl<V: Value> ValueStorage<V> {
     where
         F: FnMut(PointOffset, &V) -> std::io::Result<bool>,
     {
-        for pointer in self.tracker.read().iter_pointers().flatten() {
+        for (point_offset, pointer) in self.tracker.read().iter_pointers().flatten() {
             let ValuePointer {
                 page_id,
                 block_offset,
@@ -359,7 +359,7 @@ impl<V: Value> ValueStorage<V> {
             let raw = self.read_from_pages(page_id, block_offset, length);
             let decompressed = Self::decompress(&raw);
             let value = V::from_bytes(&decompressed);
-            if !callback(block_offset, &value)? {
+            if !callback(point_offset, &value)? {
                 return Ok(());
             }
         }
