@@ -15,6 +15,9 @@ pub const BLOCK_SIZE_BYTES: usize = 128;
 /// Default page size used when not specified
 pub const PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
 
+/// Storage for values of type `V`.
+///
+/// Assumes sequential IDs to the values (0, 1, 2, 3, ...)
 #[derive(Debug)]
 pub struct ValueStorage<V> {
     /// Holds mapping from `PointOffset` -> `ValuePointer`
