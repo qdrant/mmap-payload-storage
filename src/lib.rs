@@ -2,7 +2,6 @@ pub mod bitmask;
 pub mod fixtures;
 mod page;
 pub mod payload;
-mod stats;
 mod tracker;
 mod utils_copied;
 pub mod value;
