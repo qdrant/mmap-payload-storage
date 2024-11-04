@@ -9,7 +9,7 @@ use crate::utils_copied::{
     mmap_type::{self, MmapSlice},
 };
 
-use super::{RegionId, REGION_SIZE_BLOCKS};
+use super::{RegionId, StorageConfig};
 
 /// Gaps of contiguous zeros in a bitmask region.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -20,10 +20,15 @@ pub struct RegionGaps {
 }
 
 impl RegionGaps {
-    pub fn new(leading: u16, trailing: u16, max: u16) -> Self {
+    pub fn new(
+        leading: u16,
+        trailing: u16,
+        max: u16,
+        #[cfg(debug_assertions)] region_size_blocks: u16,
+    ) -> Self {
         #[cfg(debug_assertions)]
         {
-            let maximum_possible = REGION_SIZE_BLOCKS as u16;
+            let maximum_possible = region_size_blocks;
 
             assert!(max <= maximum_possible, "Unexpected max gap size");
 
@@ -66,6 +71,7 @@ impl RegionGaps {
 #[derive(Debug)]
 pub(super) struct BitmaskGaps {
     pub path: PathBuf,
+    config: StorageConfig,
     mmap_slice: MmapSlice<RegionGaps>,
 }
 
@@ -78,7 +84,11 @@ impl BitmaskGaps {
         self.path.clone()
     }
 
-    pub fn create(dir: &Path, mut iter: impl ExactSizeIterator<Item = RegionGaps>) -> Self {
+    pub fn create(
+        dir: &Path,
+        mut iter: impl ExactSizeIterator<Item = RegionGaps>,
+        config: StorageConfig,
+    ) -> Self {
         let path = Self::file_path(dir);
 
         let length_in_bytes = iter.len() * size_of::<RegionGaps>();
@@ -91,15 +101,23 @@ impl BitmaskGaps {
 
         mmap_slice.fill_with(|| iter.next().unwrap());
 
-        Self { path, mmap_slice }
+        Self {
+            path,
+            mmap_slice,
+            config,
+        }
     }
 
-    pub fn open(dir: &Path) -> Self {
+    pub fn open(dir: &Path, config: StorageConfig) -> Self {
         let path = Self::file_path(dir);
         let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
         let mmap_slice = unsafe { MmapSlice::from(mmap) };
 
-        Self { path, mmap_slice }
+        Self {
+            path,
+            mmap_slice,
+            config,
+        }
     }
 
     pub fn flush(&self) -> Result<(), mmap_type::Error> {
@@ -132,7 +150,7 @@ impl BitmaskGaps {
         self.mmap_slice
             .iter()
             .rev()
-            .take_while_inclusive(|gap| gap.trailing == REGION_SIZE_BLOCKS as u16)
+            .take_while_inclusive(|gap| gap.trailing == self.config.region_size_blocks as u16)
             .map(|gap| gap.trailing as u32)
             .sum()
     }
@@ -157,7 +175,7 @@ impl BitmaskGaps {
     /// Returns the region id of the gap.
     /// In case of boundary gaps, returns the region id of the left gap.
     pub fn find_fitting_gap(&self, num_blocks: u32) -> Option<Range<RegionId>> {
-        let regions_needed = num_blocks.div_ceil(REGION_SIZE_BLOCKS as u32) as usize;
+        let regions_needed = num_blocks.div_ceil(self.config.region_size_blocks as u32) as usize;
 
         let window_size = regions_needed + 1;
 
@@ -177,14 +195,14 @@ impl BitmaskGaps {
                 if window_size >= 3 {
                     // check that the middle regions are empty
                     for gap in gaps.iter().take(window_size - 1).skip(1) {
-                        if gap.max as usize != REGION_SIZE_BLOCKS {
+                        if gap.max as usize != self.config.region_size_blocks {
                             return None;
                         }
                     }
                     let trailing = gaps[0].trailing;
                     let leading = gaps[window_size - 1].leading;
-                    let merged_gap =
-                        (trailing + leading) as usize + (window_size - 2) * REGION_SIZE_BLOCKS;
+                    let merged_gap = (trailing + leading) as usize
+                        + (window_size - 2) * self.config.region_size_blocks;
 
                     return if merged_gap as u32 >= num_blocks {
                         Some(
@@ -233,26 +251,28 @@ impl BitmaskGaps {
 
 #[cfg(test)]
 mod tests {
+    use crate::{bitmask::DEFAULT_REGION_SIZE_BLOCKS, config::StorageOptions};
+
     use super::*;
 
     use proptest::prelude::*;
     use tempfile::tempdir;
 
     prop_compose! {
-        fn arbitrary_region_gaps()(
-            leading in 0..=REGION_SIZE_BLOCKS as u16,
-            trailing in 0..=REGION_SIZE_BLOCKS as u16,
-            max in 0..=REGION_SIZE_BLOCKS as u16,
+        fn arbitrary_region_gaps(region_size_blocks: u16)(
+            leading in 0..=region_size_blocks,
+            trailing in 0..=region_size_blocks,
+            max in 0..=region_size_blocks,
         ) -> RegionGaps {
-            if leading + trailing >= REGION_SIZE_BLOCKS as u16 {
-                return RegionGaps::all_free(REGION_SIZE_BLOCKS as u16);
+            if leading + trailing >= region_size_blocks {
+                return RegionGaps::all_free(region_size_blocks);
             }
 
-            let in_between = REGION_SIZE_BLOCKS as u16 - leading - trailing;
+            let in_between = region_size_blocks - leading - trailing;
 
             let max = max.min(in_between.saturating_sub(2)).max(leading).max(trailing);
 
-            RegionGaps::new(leading, trailing, max)
+            RegionGaps::new(leading, trailing, max, region_size_blocks)
         }
     }
 
@@ -261,16 +281,19 @@ mod tests {
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
-            arbitrary_region_gaps().boxed()
+            arbitrary_region_gaps(DEFAULT_REGION_SIZE_BLOCKS as u16).boxed()
         }
     }
 
-    fn regions_gaps_to_bitvec(gaps: &[RegionGaps]) -> bitvec::vec::BitVec {
-        let total_bits = gaps.len() * REGION_SIZE_BLOCKS;
+    fn regions_gaps_to_bitvec(
+        gaps: &[RegionGaps],
+        region_size_blocks: usize,
+    ) -> bitvec::vec::BitVec {
+        let total_bits = gaps.len() * region_size_blocks;
         let mut bv = bitvec::vec::BitVec::repeat(true, total_bits);
 
         for (region_idx, gap) in gaps.iter().enumerate() {
-            let region_start = region_idx * REGION_SIZE_BLOCKS;
+            let region_start = region_idx * region_size_blocks;
 
             // Handle leading zeros
             if gap.leading > 0 {
@@ -281,7 +304,7 @@ mod tests {
 
             // Handle trailing zeros
             if gap.trailing > 0 {
-                let trailing_start = region_start + REGION_SIZE_BLOCKS - gap.trailing as usize;
+                let trailing_start = region_start + region_size_blocks - gap.trailing as usize;
                 for i in 0..gap.trailing as usize {
                     bv.set(trailing_start + i, false);
                 }
@@ -307,12 +330,13 @@ mod tests {
         #[test]
         fn test_find_fitting_gap(
             gaps in prop::collection::vec(any::<RegionGaps>(), 1..100),
-            num_blocks in 1..=(REGION_SIZE_BLOCKS as u32 * 3)
+            num_blocks in 1..=(DEFAULT_REGION_SIZE_BLOCKS as u32 * 3)
         ) {
             let temp_dir = tempdir().unwrap();
-            let bitmask_gaps = BitmaskGaps::create(temp_dir.path(), gaps.clone().into_iter());
+            let config = StorageOptions::default().into();
+            let bitmask_gaps = BitmaskGaps::create(temp_dir.path(), gaps.clone().into_iter(), config);
 
-            let bitvec = regions_gaps_to_bitvec(&gaps);
+            let bitvec = regions_gaps_to_bitvec(&gaps, DEFAULT_REGION_SIZE_BLOCKS);
 
             if let Some(range) = bitmask_gaps.find_fitting_gap(num_blocks) {
                 // Range should be within bounds
@@ -322,12 +346,12 @@ mod tests {
 
                 // check that range is as constrained as possible
                 let total_regions = range.end - range.start;
-                let max_needed_regions = num_blocks.div_ceil(REGION_SIZE_BLOCKS as u32) + 1;
+                let max_needed_regions = num_blocks.div_ceil(DEFAULT_REGION_SIZE_BLOCKS as u32) + 1;
                 prop_assert!(total_regions <= max_needed_regions);
 
                 // Range should actually have a gap with enough blocks
-                let regions_start = range.start as usize * REGION_SIZE_BLOCKS;
-                let regions_end = range.end as usize * REGION_SIZE_BLOCKS;
+                let regions_start = range.start as usize * DEFAULT_REGION_SIZE_BLOCKS;
+                let regions_end = range.end as usize * DEFAULT_REGION_SIZE_BLOCKS;
                 let max_gap = bitvec[regions_start..regions_end].iter().chunk_by(|b| **b).into_iter()
                     .filter(|(used, _group)| !*used)
                     .map(|(_, group)| group.count() as u32)
@@ -348,15 +372,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let dir_path = dir.path();
 
+        let region_size_blocks = DEFAULT_REGION_SIZE_BLOCKS as u16;
+
         let gaps = vec![
-            RegionGaps::new(1, 2, 3),
-            RegionGaps::new(4, 5, 6),
-            RegionGaps::new(7, 8, 9),
+            RegionGaps::new(1, 2, 3, region_size_blocks),
+            RegionGaps::new(4, 5, 6, region_size_blocks),
+            RegionGaps::new(7, 8, 9, region_size_blocks),
         ];
 
         // Create RegionGaps and write gaps
         {
-            let region_gaps = BitmaskGaps::create(dir_path, gaps.clone().into_iter());
+            let config = StorageOptions::default().into();
+            let region_gaps = BitmaskGaps::create(dir_path, gaps.clone().into_iter(), config);
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);
@@ -365,7 +392,8 @@ mod tests {
 
         // Reopen RegionGaps and verify gaps
         {
-            let region_gaps = BitmaskGaps::open(dir_path);
+            let config = StorageOptions::default().into();
+            let region_gaps = BitmaskGaps::open(dir_path, config);
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);
@@ -373,10 +401,14 @@ mod tests {
         }
 
         // Extend RegionGaps with more gaps
-        let more_gaps = vec![RegionGaps::new(10, 11, 12), RegionGaps::new(13, 14, 15)];
+        let more_gaps = vec![
+            RegionGaps::new(10, 11, 12, region_size_blocks),
+            RegionGaps::new(13, 14, 15, region_size_blocks),
+        ];
 
         {
-            let mut region_gaps = BitmaskGaps::open(dir_path);
+            let config = StorageOptions::default().into();
+            let mut region_gaps = BitmaskGaps::open(dir_path, config);
             region_gaps.extend(more_gaps.clone().into_iter());
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
@@ -386,7 +418,8 @@ mod tests {
 
         // Reopen RegionGaps and verify all gaps
         {
-            let region_gaps = BitmaskGaps::open(dir_path);
+            let config = StorageOptions::default().into();
+            let region_gaps = BitmaskGaps::open(dir_path, config);
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);
