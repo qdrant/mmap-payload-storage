@@ -482,7 +482,8 @@ mod tests {
             page_size_bytes: Some(8192),
             ..Default::default()
         }
-        .into();
+        .try_into()
+        .unwrap();
         assert_eq!(super::Bitmask::length_for_page(config), 8);
     }
 
@@ -499,7 +500,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut bitmask = super::Bitmask::create(dir.path(), options.into());
+        let mut bitmask = super::Bitmask::create(dir.path(), options.try_into().unwrap());
         bitmask.cover_new_page();
 
         assert_eq!(bitmask.bitslice.len() as u32, blocks_per_page * 2);

@@ -76,10 +76,15 @@ impl<V: Blob> BlobStore<V> {
     ///
     /// `base_path` is the directory where the storage files will be stored.
     /// It should exist already.
-    pub fn new(base_path: PathBuf, options: StorageOptions) -> Self {
-        assert!(base_path.exists(), "Base path does not exist");
-        assert!(base_path.is_dir(), "Base path is not a directory");
-        let config = StorageConfig::from(options);
+    pub fn new(base_path: PathBuf, options: StorageOptions) -> Result<Self, &'static str> {
+        if !base_path.exists() {
+            return Err("Base path does not exist");
+        }
+        if !base_path.is_dir() {
+            return Err("Base path is not a directory");
+        }
+
+        let config = StorageConfig::try_from(options)?;
 
         // write config to disk
         let config_path = base_path.join(CONFIG_FILENAME);
@@ -101,7 +106,7 @@ impl<V: Blob> BlobStore<V> {
         let page = Page::new(&path, storage.config.page_size_bytes);
         storage.pages.push(page);
 
-        storage
+        Ok(storage)
     }
 
     /// Open an existing storage at the given path
@@ -776,7 +781,7 @@ mod tests {
         );
 
         {
-            let mut storage = BlobStore::new(path.clone(), Default::default());
+            let mut storage = BlobStore::new(path.clone(), Default::default()).unwrap();
             storage.put_value(0, &payload);
             assert_eq!(storage.pages.len(), 1);
 

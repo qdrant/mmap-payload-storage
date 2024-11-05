@@ -8,7 +8,7 @@ use tempfile::{Builder, TempDir};
 /// Create an empty storage with the default configuration
 pub fn empty_storage() -> (TempDir, BlobStore<Payload>) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-    let storage = BlobStore::new(dir.path().to_path_buf(), Default::default());
+    let storage = BlobStore::new(dir.path().to_path_buf(), Default::default()).unwrap();
     (dir, storage)
 }
 
@@ -19,7 +19,7 @@ pub fn empty_storage_sized(page_size: usize) -> (TempDir, BlobStore<Payload>) {
         page_size_bytes: Some(page_size),
         ..Default::default()
     };
-    let storage = BlobStore::new(dir.path().to_path_buf(), options);
+    let storage = BlobStore::new(dir.path().to_path_buf(), options).unwrap();
     (dir, storage)
 }
 

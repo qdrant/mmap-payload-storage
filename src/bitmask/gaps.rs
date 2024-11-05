@@ -333,7 +333,7 @@ mod tests {
             num_blocks in 1..=(DEFAULT_REGION_SIZE_BLOCKS as u32 * 3)
         ) {
             let temp_dir = tempdir().unwrap();
-            let config = StorageOptions::default().into();
+            let config = StorageOptions::default().try_into().unwrap();
             let bitmask_gaps = BitmaskGaps::create(temp_dir.path(), gaps.clone().into_iter(), config);
 
             let bitvec = regions_gaps_to_bitvec(&gaps, DEFAULT_REGION_SIZE_BLOCKS);
@@ -382,7 +382,7 @@ mod tests {
 
         // Create RegionGaps and write gaps
         {
-            let config = StorageOptions::default().into();
+            let config = StorageOptions::default().try_into().unwrap();
             let region_gaps = BitmaskGaps::create(dir_path, gaps.clone().into_iter(), config);
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
@@ -392,7 +392,7 @@ mod tests {
 
         // Reopen RegionGaps and verify gaps
         {
-            let config = StorageOptions::default().into();
+            let config = StorageOptions::default().try_into().unwrap();
             let region_gaps = BitmaskGaps::open(dir_path, config);
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
@@ -407,7 +407,7 @@ mod tests {
         ];
 
         {
-            let config = StorageOptions::default().into();
+            let config = StorageOptions::default().try_into().unwrap();
             let mut region_gaps = BitmaskGaps::open(dir_path, config);
             region_gaps.extend(more_gaps.clone().into_iter());
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
@@ -418,7 +418,7 @@ mod tests {
 
         // Reopen RegionGaps and verify all gaps
         {
-            let config = StorageOptions::default().into();
+            let config = StorageOptions::default().try_into().unwrap();
             let region_gaps = BitmaskGaps::open(dir_path, config);
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
