@@ -6,7 +6,7 @@ use crate::blob_store::{DEFAULT_BLOCK_SIZE_BYTES, DEFAULT_PAGE_SIZE_BYTES};
 /// Configuration options for the storage
 #[derive(Debug, Default)]
 pub struct StorageOptions {
-    /// Size of a page in bytes. Must be a multiple of (`block_size` * `region_size`).
+    /// Size of a page in bytes. Must be a multiple of (`block_size_bytes` * `region_size_blocks`).
     ///
     /// Default is 32MB
     pub page_size_bytes: Option<usize>,

@@ -480,6 +480,7 @@ mod tests {
     fn test_length_for_page() {
         let config = &StorageOptions {
             page_size_bytes: Some(8192),
+            region_size_blocks: Some(1),
             ..Default::default()
         }
         .try_into()
