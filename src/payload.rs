@@ -24,8 +24,8 @@ impl Blob for Payload {
 
 #[cfg(test)]
 mod tests {
-    use crate::payload::Payload;
     use crate::blob::Blob;
+    use crate::payload::Payload;
 
     #[test]
     fn test_serde_symmetry() {

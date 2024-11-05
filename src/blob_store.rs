@@ -1,8 +1,8 @@
 use crate::bitmask::Bitmask;
+use crate::blob::Blob;
 use crate::page::Page;
 use crate::tracker::{BlockOffset, PageId, PointOffset, Tracker, ValuePointer};
 use crate::utils_copied::mmap_type;
-use crate::blob::Blob;
 
 use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
@@ -415,9 +415,9 @@ mod tests {
 
     use crate::{
         bitmask::REGION_SIZE_BLOCKS,
+        blob::Blob,
         fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS},
         payload::Payload,
-        blob::Blob,
     };
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
     use rstest::rstest;

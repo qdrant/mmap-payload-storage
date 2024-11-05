@@ -1,6 +1,6 @@
-use criterion::{criterion_group, criterion_main, Criterion};
 use blob_store::fixtures::{empty_storage, HM_FIELDS};
 use blob_store::payload::Payload;
+use criterion::{criterion_group, criterion_main, Criterion};
 use serde_json::Value;
 
 pub fn real_data_data_bench(c: &mut Criterion) {

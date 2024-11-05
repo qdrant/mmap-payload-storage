@@ -1,7 +1,7 @@
+use crate::blob_store::BLOCK_SIZE_BYTES;
 use crate::tracker::BlockOffset;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
-use crate::blob_store::BLOCK_SIZE_BYTES;
 use memmap2::MmapMut;
 use std::path::{Path, PathBuf};
 

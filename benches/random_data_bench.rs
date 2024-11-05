@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use blob_store::fixtures::{empty_storage, random_payload};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 /// sized similarly to the real dataset for a fair comparison
 const PAYLOAD_COUNT: u32 = 100_000;

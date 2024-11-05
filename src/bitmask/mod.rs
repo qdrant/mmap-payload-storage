@@ -7,11 +7,11 @@ use bitvec::slice::BitSlice;
 use gaps::{BitmaskGaps, RegionGaps};
 use itertools::Itertools;
 
+use crate::blob_store::BLOCK_SIZE_BYTES;
 use crate::tracker::{BlockOffset, PageId};
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use crate::utils_copied::mmap_type::{self, MmapBitSlice};
-use crate::blob_store::BLOCK_SIZE_BYTES;
 
 const BITMASK_NAME: &str = "bitmask.dat";
 pub const REGION_SIZE_BLOCKS: usize = 8_192;
