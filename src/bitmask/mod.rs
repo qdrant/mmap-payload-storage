@@ -448,12 +448,20 @@ impl Bitmask {
                 .sum::<u32>();
         }
 
-        RegionGaps::new(
-            leading as u16,
-            trailing as u16,
-            max as u16,
-            region_size_blocks as u16,
-        )
+        #[cfg(debug_assertions)]
+        {
+            RegionGaps::new(
+                leading as u16,
+                trailing as u16,
+                max as u16,
+                region_size_blocks as u16,
+            )
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            RegionGaps::new(leading as u16, trailing as u16, max as u16)
+        }
     }
 }
 
