@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use mmap_value_storage::fixtures::{empty_storage, random_payload};
+use blob_store::fixtures::{empty_storage, random_payload};
 
 /// sized similarly to the real dataset for a fair comparison
 const PAYLOAD_COUNT: u32 = 100_000;

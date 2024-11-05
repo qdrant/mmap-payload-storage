@@ -4,7 +4,8 @@ mod page;
 pub mod payload;
 mod tracker;
 mod utils_copied;
-pub mod value;
-mod value_storage;
+pub mod blob;
+mod blob_store;
 
-pub use value_storage::ValueStorage;
+pub use blob_store::BlobStore;
+pub use blob::Blob;

@@ -1,6 +1,6 @@
 use bitvec::vec::BitVec;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mmap_value_storage::bitmask::{Bitmask, REGION_SIZE_BLOCKS};
+use blob_store::bitmask::{Bitmask, REGION_SIZE_BLOCKS};
 use rand::{thread_rng, Rng};
 
 pub fn bench_bitmask_ops(c: &mut Criterion) {

@@ -11,7 +11,7 @@ use crate::tracker::{BlockOffset, PageId};
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use crate::utils_copied::mmap_type::{self, MmapBitSlice};
-use crate::value_storage::BLOCK_SIZE_BYTES;
+use crate::blob_store::BLOCK_SIZE_BYTES;
 
 const BITMASK_NAME: &str = "bitmask.dat";
 pub const REGION_SIZE_BLOCKS: usize = 8_192;
@@ -456,7 +456,7 @@ mod tests {
     use proptest::prelude::*;
     use rand::thread_rng;
 
-    use crate::{bitmask::REGION_SIZE_BLOCKS, value_storage::BLOCK_SIZE_BYTES};
+    use crate::{bitmask::REGION_SIZE_BLOCKS, blob_store::BLOCK_SIZE_BYTES};
 
     #[test]
     fn test_length_for_page() {

@@ -2,7 +2,7 @@ use crate::bitmask::Bitmask;
 use crate::page::Page;
 use crate::tracker::{BlockOffset, PageId, PointOffset, Tracker, ValuePointer};
 use crate::utils_copied::mmap_type;
-use crate::value::Value;
+use crate::blob::Blob;
 
 use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
@@ -19,7 +19,7 @@ pub const PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
 ///
 /// Assumes sequential IDs to the values (0, 1, 2, 3, ...)
 #[derive(Debug)]
-pub struct ValueStorage<V> {
+pub struct BlobStore<V> {
     /// Holds mapping from `PointOffset` -> `ValuePointer`
     ///
     /// Stored in a separate file
@@ -37,7 +37,7 @@ pub struct ValueStorage<V> {
     _value_type: std::marker::PhantomData<V>,
 }
 
-impl<V: Value> ValueStorage<V> {
+impl<V: Blob> BlobStore<V> {
     /// LZ4 compression
     fn compress(value: &[u8]) -> Vec<u8> {
         compress_prepend_size(value)
@@ -370,7 +370,7 @@ impl<V: Value> ValueStorage<V> {
     }
 }
 
-impl<V> ValueStorage<V> {
+impl<V> BlobStore<V> {
     /// The number of blocks needed for a given value bytes size
     fn blocks_for_value(value_size: usize) -> u32 {
         value_size.div_ceil(BLOCK_SIZE_BYTES).try_into().unwrap()
@@ -403,7 +403,7 @@ impl<V> ValueStorage<V> {
     }
 }
 
-impl<V> Drop for ValueStorage<V> {
+impl<V> Drop for BlobStore<V> {
     fn drop(&mut self) {
         self.flush().unwrap();
     }
@@ -417,7 +417,7 @@ mod tests {
         bitmask::REGION_SIZE_BLOCKS,
         fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS},
         payload::Payload,
-        value::Value,
+        blob::Blob,
     };
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
     use rstest::rstest;
@@ -687,7 +687,7 @@ mod tests {
 
         // reopen storage
         let storage =
-            ValueStorage::<Payload>::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
+            BlobStore::<Payload>::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
 
         // asset same length
         assert_eq!(storage.tracker.read().mapping_len(), model_hashmap.len());
@@ -762,7 +762,7 @@ mod tests {
         );
 
         {
-            let mut storage = ValueStorage::new(path.clone(), None);
+            let mut storage = BlobStore::new(path.clone(), None);
 
             storage.put_value(0, &payload);
             assert_eq!(storage.pages.len(), 1);
@@ -780,7 +780,7 @@ mod tests {
         }
 
         // reopen storage
-        let storage = ValueStorage::<Payload>::open(path.clone(), None).unwrap();
+        let storage = BlobStore::<Payload>::open(path.clone(), None).unwrap();
         assert_eq!(storage.pages.len(), 1);
 
         let stored_payload = storage.get_value(0);
@@ -792,7 +792,7 @@ mod tests {
     fn test_with_real_hm_data() {
         const EXPECTED_LEN: usize = 105_542;
 
-        fn write_data(storage: &mut ValueStorage<Payload>, init_offset: u32) -> u32 {
+        fn write_data(storage: &mut BlobStore<Payload>, init_offset: u32) -> u32 {
             let csv_data = include_str!("../data/h&m-articles.csv");
             let mut rdr = csv::Reader::from_reader(csv_data.as_bytes());
             let mut point_offset = init_offset;
@@ -812,7 +812,7 @@ mod tests {
         }
 
         fn storage_double_pass_is_consistent(
-            storage: &ValueStorage<Payload>,
+            storage: &BlobStore<Payload>,
             right_shift_offset: u32,
         ) {
             // validate storage value equality between the two writes
@@ -862,7 +862,7 @@ mod tests {
         drop(storage);
 
         // reopen storage
-        let mut storage = ValueStorage::open(dir.path().to_path_buf(), None).unwrap();
+        let mut storage = BlobStore::open(dir.path().to_path_buf(), None).unwrap();
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 4);
         assert_eq!(storage.tracker.read().mapping_len(), EXPECTED_LEN * 2);
@@ -894,9 +894,9 @@ mod tests {
     fn test_payload_compression() {
         let payload = random_payload(&mut rand::thread_rng(), 2);
         let payload_bytes = payload.to_bytes();
-        let compressed = ValueStorage::<Payload>::compress(&payload_bytes);
-        let decompressed = ValueStorage::<Payload>::decompress(&compressed);
-        let decompressed_payload = <Payload as Value>::from_bytes(&decompressed);
+        let compressed = BlobStore::<Payload>::compress(&payload_bytes);
+        let decompressed = BlobStore::<Payload>::decompress(&compressed);
+        let decompressed_payload = <Payload as Blob>::from_bytes(&decompressed);
         assert_eq!(payload, decompressed_payload);
     }
 }

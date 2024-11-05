@@ -3,15 +3,15 @@
 use ::rocksdb::DB;
 use bustle::{Mix, Workload};
 use fixture::ArcStorage;
-use mmap_value_storage::payload::Payload;
-use mmap_value_storage::ValueStorage;
+use blob_store::payload::Payload;
+use blob_store::BlobStore;
 
 mod fixture;
 mod payload_storage;
 #[cfg(feature = "rocksdb")]
 mod rocksdb;
 
-type PayloadStorage = ValueStorage<Payload>;
+type PayloadStorage = BlobStore<Payload>;
 
 fn default_opts(workload: &mut Workload) -> &mut Workload {
     let seed = [42; 32];

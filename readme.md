@@ -1,4 +1,4 @@
-# mmap-value-storage
+# blob_store
 
 New storage for variable-sized values using mmap.
 
