@@ -1,6 +1,6 @@
+use blob_store::fixtures::{empty_storage, HM_FIELDS};
+use blob_store::payload::Payload;
 use criterion::{criterion_group, criterion_main, Criterion};
-use mmap_value_storage::fixtures::{empty_storage, HM_FIELDS};
-use mmap_value_storage::payload::Payload;
 use serde_json::Value;
 
 pub fn real_data_data_bench(c: &mut Criterion) {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
-use crate::value::Value;
+use crate::blob::Blob;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Payload(pub Map<String, serde_json::Value>);
@@ -12,7 +12,7 @@ impl Default for Payload {
     }
 }
 
-impl Value for Payload {
+impl Blob for Payload {
     fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap()
     }
@@ -24,8 +24,8 @@ impl Value for Payload {
 
 #[cfg(test)]
 mod tests {
+    use crate::blob::Blob;
     use crate::payload::Payload;
-    use crate::value::Value;
 
     #[test]
     fn test_serde_symmetry() {

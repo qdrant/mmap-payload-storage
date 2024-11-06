@@ -4,7 +4,7 @@ use std::{
 };
 
 use bustle::CollectionHandle;
-use mmap_value_storage::payload::Payload;
+use blob_store::payload::Payload;
 use parking_lot::RwLock;
 use serde_json::json;
 use tempfile::TempDir;

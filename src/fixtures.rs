@@ -1,20 +1,20 @@
 use crate::payload::Payload;
-use crate::ValueStorage;
+use crate::BlobStore;
 use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
 use tempfile::{Builder, TempDir};
 
 /// Create an empty storage with the default configuration
-pub fn empty_storage() -> (TempDir, ValueStorage<Payload>) {
+pub fn empty_storage() -> (TempDir, BlobStore<Payload>) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-    let storage = ValueStorage::new(dir.path().to_path_buf(), None);
+    let storage = BlobStore::new(dir.path().to_path_buf(), None);
     (dir, storage)
 }
 
 /// Create an empty storage with a specific page size
-pub fn empty_storage_sized(page_size: usize) -> (TempDir, ValueStorage<Payload>) {
+pub fn empty_storage_sized(page_size: usize) -> (TempDir, BlobStore<Payload>) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-    let storage = ValueStorage::new(dir.path().to_path_buf(), Some(page_size));
+    let storage = BlobStore::new(dir.path().to_path_buf(), Some(page_size));
     (dir, storage)
 }
 
