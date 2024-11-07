@@ -497,11 +497,13 @@ mod tests {
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.tracker.read().mapping_len(), 1);
         let files = storage.files();
-        assert_eq!(files.len(), 4, "Expected 4 files, got {:?}", files);
+        assert_eq!(files.len(), 5, "Expected 5 files, got {:?}", files);
         assert_eq!(files[0].file_name().unwrap(), "tracker.dat");
         assert_eq!(files[1].file_name().unwrap(), "page_0.dat");
         assert_eq!(files[2].file_name().unwrap(), "bitmask.dat");
         assert_eq!(files[3].file_name().unwrap(), "gaps.dat");
+        assert_eq!(files[4].file_name().unwrap(), "config.json");
+        
     }
 
     #[test]
