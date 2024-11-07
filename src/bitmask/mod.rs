@@ -14,7 +14,6 @@ use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
 use crate::utils_copied::mmap_type::{self, MmapBitSlice};
 
 const BITMASK_NAME: &str = "bitmask.dat";
-pub const DEFAULT_REGION_SIZE_BLOCKS: usize = 8_192;
 
 type RegionId = u32;
 
@@ -472,9 +471,7 @@ mod tests {
     use proptest::prelude::*;
     use rand::thread_rng;
 
-    use crate::bitmask::DEFAULT_REGION_SIZE_BLOCKS;
-    use crate::blob_store::DEFAULT_BLOCK_SIZE_BYTES;
-    use crate::config::StorageOptions;
+    use crate::config::{StorageOptions, DEFAULT_BLOCK_SIZE_BYTES, DEFAULT_REGION_SIZE_BLOCKS};
 
     #[test]
     fn test_length_for_page() {

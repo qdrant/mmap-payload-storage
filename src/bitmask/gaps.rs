@@ -251,7 +251,7 @@ impl BitmaskGaps {
 
 #[cfg(test)]
 mod tests {
-    use crate::{bitmask::DEFAULT_REGION_SIZE_BLOCKS, config::StorageOptions};
+    use crate::config::{StorageOptions, DEFAULT_REGION_SIZE_BLOCKS};
 
     use super::*;
 

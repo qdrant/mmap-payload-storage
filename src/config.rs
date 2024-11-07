@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::bitmask::DEFAULT_REGION_SIZE_BLOCKS;
-use crate::blob_store::{DEFAULT_BLOCK_SIZE_BYTES, DEFAULT_PAGE_SIZE_BYTES};
+/// Expect JSON values to have roughly 3–5 fields with mostly small values.
+/// For 1M values, this would require 128MB of memory.
+pub const DEFAULT_BLOCK_SIZE_BYTES: usize = 128;
+
+/// Default page size used when not specified
+pub const DEFAULT_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
+
+pub const DEFAULT_REGION_SIZE_BLOCKS: usize = 8_192;
 
 /// Configuration options for the storage
 #[derive(Debug, Default)]

@@ -1,7 +1,7 @@
 pub mod bitmask;
 pub mod blob;
 mod blob_store;
-mod config;
+pub mod config;
 pub mod fixtures;
 mod page;
 pub mod payload;

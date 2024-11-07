@@ -9,13 +9,6 @@ use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 
-/// Expect JSON values to have roughly 3–5 fields with mostly small values.
-/// For 1M values, this would require 128MB of memory.
-pub const DEFAULT_BLOCK_SIZE_BYTES: usize = 128;
-
-/// Default page size used when not specified
-pub const DEFAULT_PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
-
 const CONFIG_FILENAME: &str = "config.json";
 
 /// Storage for values of type `V`.
@@ -433,8 +426,10 @@ impl<V> Drop for BlobStore<V> {
 mod tests {
     use super::*;
 
-    use crate::bitmask::DEFAULT_REGION_SIZE_BLOCKS;
     use crate::blob::Blob;
+    use crate::config::{
+        DEFAULT_BLOCK_SIZE_BYTES, DEFAULT_PAGE_SIZE_BYTES, DEFAULT_REGION_SIZE_BLOCKS,
+    };
     use crate::fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS};
     use crate::payload::Payload;
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
