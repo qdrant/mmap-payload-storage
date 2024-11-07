@@ -1,5 +1,5 @@
 use bitvec::vec::BitVec;
-use blob_store::bitmask::{Bitmask, REGION_SIZE_BLOCKS};
+use blob_store::{bitmask::Bitmask, config::DEFAULT_REGION_SIZE_BLOCKS};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::{thread_rng, Rng};
 
@@ -8,15 +8,15 @@ pub fn bench_bitmask_ops(c: &mut Criterion) {
     let rng = thread_rng();
     let random_bitvec = rng
         .sample_iter::<bool, _>(distr)
-        .take(1000 * REGION_SIZE_BLOCKS)
+        .take(1000 * DEFAULT_REGION_SIZE_BLOCKS)
         .collect::<BitVec>();
 
-    let mut bitslice_iter = random_bitvec.windows(REGION_SIZE_BLOCKS).cycle();
+    let mut bitslice_iter = random_bitvec.windows(DEFAULT_REGION_SIZE_BLOCKS).cycle();
 
     c.bench_function("calculate_gaps", |b| {
         b.iter(|| {
             let bitslice = bitslice_iter.next().unwrap();
-            Bitmask::calculate_gaps(black_box(bitslice))
+            Bitmask::calculate_gaps(black_box(bitslice), DEFAULT_REGION_SIZE_BLOCKS)
         })
     });
 

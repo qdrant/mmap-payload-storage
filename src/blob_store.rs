@@ -1,31 +1,28 @@
 use crate::bitmask::Bitmask;
 use crate::blob::Blob;
+use crate::config::{StorageConfig, StorageOptions};
 use crate::page::Page;
 use crate::tracker::{BlockOffset, PageId, PointOffset, Tracker, ValuePointer};
+use crate::utils_copied::file_operations::atomic_save_json;
 use crate::utils_copied::mmap_type;
 
 use lz4_flex::compress_prepend_size;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 
-/// Expect JSON values to have roughly 3–5 fields with mostly small values.
-/// For 1M values, this would require 128MB of memory.
-pub const BLOCK_SIZE_BYTES: usize = 128;
-
-/// Default page size used when not specified
-pub const PAGE_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32MB
+const CONFIG_FILENAME: &str = "config.json";
 
 /// Storage for values of type `V`.
 ///
 /// Assumes sequential IDs to the values (0, 1, 2, 3, ...)
 #[derive(Debug)]
 pub struct BlobStore<V> {
+    /// Configuration of the storage.
+    pub(super) config: StorageConfig,
     /// Holds mapping from `PointOffset` -> `ValuePointer`
     ///
     /// Stored in a separate file
     tracker: RwLock<Tracker>,
-    /// Page size in bytes when creating new pages, normally 32MB
-    pub(super) new_page_size: usize,
     /// Mapping from page_id -> mmap page
     pub(super) pages: Vec<Page>,
     /// Bitmask to represent which "blocks" of data in the pages are used and which are free.
@@ -62,6 +59,8 @@ impl<V: Blob> BlobStore<V> {
         for bitmask_file in self.bitmask.read().files() {
             paths.push(bitmask_file);
         }
+        // config file
+        paths.push(self.base_path.join(CONFIG_FILENAME));
         paths
     }
 
@@ -73,43 +72,56 @@ impl<V: Blob> BlobStore<V> {
     ///
     /// `base_path` is the directory where the storage files will be stored.
     /// It should exist already.
-    pub fn new(base_path: PathBuf, page_size: Option<usize>) -> Self {
-        assert!(base_path.exists(), "Base path does not exist");
-        assert!(base_path.is_dir(), "Base path is not a directory");
-        let page_size = page_size.unwrap_or(PAGE_SIZE_BYTES);
+    pub fn new(base_path: PathBuf, options: StorageOptions) -> Result<Self, String> {
+        if !base_path.exists() {
+            return Err("Base path does not exist".to_string());
+        }
+        if !base_path.is_dir() {
+            return Err("Base path is not a directory".to_string());
+        }
+
+        let config = StorageConfig::try_from(options)?;
+        let config_path = base_path.join(CONFIG_FILENAME);
+
         let mut storage = Self {
             tracker: RwLock::new(Tracker::new(&base_path, None)),
-            new_page_size: page_size,
             pages: Default::default(),
-            bitmask: RwLock::new(Bitmask::create(&base_path, page_size)),
+            bitmask: RwLock::new(Bitmask::create(&base_path, config.clone())),
             base_path,
+            config: config.clone(),
             _value_type: std::marker::PhantomData,
         };
 
         // create first page to be covered by the bitmask
         let new_page_id = storage.next_page_id();
         let path = storage.page_path(new_page_id);
-        let page = Page::new(&path, storage.new_page_size);
+        let page = Page::new(&path, storage.config.page_size_bytes);
         storage.pages.push(page);
 
-        storage
+        // lastly, write config to disk to use as a signal that the storage has been created correctly
+        atomic_save_json(&config_path, &config).map_err(|err| err.to_string())?;
+
+        Ok(storage)
     }
 
     /// Open an existing storage at the given path
     /// Returns None if the storage does not exist
-    pub fn open(path: PathBuf, new_page_size: Option<usize>) -> Option<Self> {
-        let new_page_size = new_page_size.unwrap_or(PAGE_SIZE_BYTES);
+    pub fn open(path: PathBuf) -> Option<Self> {
+        // read config file first
+        let config_path = path.join(CONFIG_FILENAME);
+        let config_file = std::fs::File::open(&config_path).ok()?;
+        let config: StorageConfig = serde_json::from_reader(config_file).ok()?;
 
         let page_tracker = Tracker::open(&path)?;
 
-        let bitmask = Bitmask::open(&path, new_page_size)?;
+        let bitmask = Bitmask::open(&path, config.clone())?;
 
         let num_pages = bitmask.infer_num_pages();
 
         // load pages
         let mut storage = Self {
             tracker: RwLock::new(page_tracker),
-            new_page_size,
+            config,
             pages: Default::default(),
             bitmask: RwLock::new(bitmask),
             base_path: path.clone(),
@@ -140,7 +152,8 @@ impl<V: Blob> BlobStore<V> {
 
         for page_id in start_page_id.. {
             let page = &self.pages[page_id as usize];
-            let (raw, unread_bytes) = page.read_value(block_offset, length);
+            let (raw, unread_bytes) =
+                page.read_value(block_offset, length, self.config.block_size_bytes);
             raw_sections.extend(raw);
 
             if unread_bytes == 0 {
@@ -176,7 +189,7 @@ impl<V: Blob> BlobStore<V> {
     fn create_new_page(&mut self) -> u32 {
         let new_page_id = self.next_page_id();
         let path = self.page_path(new_page_id);
-        let page = Page::new(&path, self.new_page_size);
+        let page = Page::new(&path, self.config.page_size_bytes);
         self.pages.push(page);
 
         self.bitmask.write().cover_new_page();
@@ -204,7 +217,8 @@ impl<V: Blob> BlobStore<V> {
 
         let missing_blocks = num_blocks.saturating_sub(trailing_free_blocks) as usize;
 
-        let num_pages = (missing_blocks * BLOCK_SIZE_BYTES).div_ceil(self.new_page_size);
+        let num_pages =
+            (missing_blocks * self.config.block_size_bytes).div_ceil(self.config.page_size_bytes);
         for _ in 0..num_pages {
             self.create_new_page();
         }
@@ -232,7 +246,8 @@ impl<V: Blob> BlobStore<V> {
             let page = &mut self.pages[page_id as usize];
 
             let range = (value_size - unwritten_tail)..;
-            unwritten_tail = page.write_value(block_offset, &value[range]);
+            unwritten_tail =
+                page.write_value(block_offset, &value[range], self.config.block_size_bytes);
 
             if unwritten_tail == 0 {
                 break;
@@ -298,7 +313,7 @@ impl<V: Blob> BlobStore<V> {
         let comp_value = Self::compress(&value_bytes);
         let value_size = comp_value.len();
 
-        let required_blocks = Self::blocks_for_value(value_size);
+        let required_blocks = Self::blocks_for_value(value_size, self.config.block_size_bytes);
         let (start_page_id, block_offset) = self.find_or_create_available_blocks(required_blocks);
 
         // insert into a new cell, considering that it can span more than one page
@@ -372,8 +387,8 @@ impl<V: Blob> BlobStore<V> {
 
 impl<V> BlobStore<V> {
     /// The number of blocks needed for a given value bytes size
-    fn blocks_for_value(value_size: usize) -> u32 {
-        value_size.div_ceil(BLOCK_SIZE_BYTES).try_into().unwrap()
+    fn blocks_for_value(value_size: usize, block_size: usize) -> u32 {
+        value_size.div_ceil(block_size).try_into().unwrap()
     }
 
     /// Flush all mmaps and pending updates to disk
@@ -392,7 +407,7 @@ impl<V> BlobStore<V> {
                 guard.mark_blocks(
                     pointer.page_id,
                     pointer.block_offset,
-                    Self::blocks_for_value(pointer.length as usize),
+                    Self::blocks_for_value(pointer.length as usize, self.config.block_size_bytes),
                     false,
                 );
             }
@@ -413,12 +428,12 @@ impl<V> Drop for BlobStore<V> {
 mod tests {
     use super::*;
 
-    use crate::{
-        bitmask::REGION_SIZE_BLOCKS,
-        blob::Blob,
-        fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS},
-        payload::Payload,
+    use crate::blob::Blob;
+    use crate::config::{
+        DEFAULT_BLOCK_SIZE_BYTES, DEFAULT_PAGE_SIZE_BYTES, DEFAULT_REGION_SIZE_BLOCKS,
     };
+    use crate::fixtures::{empty_storage, empty_storage_sized, random_payload, HM_FIELDS};
+    use crate::payload::Payload;
     use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
     use rstest::rstest;
     use tempfile::Builder;
@@ -482,11 +497,12 @@ mod tests {
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.tracker.read().mapping_len(), 1);
         let files = storage.files();
-        assert_eq!(files.len(), 4, "Expected 4 files, got {:?}", files);
+        assert_eq!(files.len(), 5, "Expected 5 files, got {:?}", files);
         assert_eq!(files[0].file_name().unwrap(), "tracker.dat");
         assert_eq!(files[1].file_name().unwrap(), "page_0.dat");
         assert_eq!(files[2].file_name().unwrap(), "bitmask.dat");
         assert_eq!(files[3].file_name().unwrap(), "gaps.dat");
+        assert_eq!(files[4].file_name().unwrap(), "config.json");
     }
 
     #[test]
@@ -586,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_write_across_pages() {
-        let page_size = BLOCK_SIZE_BYTES * REGION_SIZE_BLOCKS;
+        let page_size = DEFAULT_BLOCK_SIZE_BYTES * DEFAULT_REGION_SIZE_BLOCKS;
         let (_dir, mut storage) = empty_storage_sized(page_size);
 
         storage.create_new_page();
@@ -600,7 +616,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Let's write it near the end
-        let block_offset = REGION_SIZE_BLOCKS - 10;
+        let block_offset = DEFAULT_REGION_SIZE_BLOCKS - 10;
         storage.write_into_pages(&value, 0, block_offset as u32);
 
         let read_value = storage.read_from_pages(0, block_offset as u32, value_len as u32);
@@ -635,7 +651,9 @@ mod tests {
     }
 
     #[rstest]
-    fn test_behave_like_hashmap(#[values(1_048_576, 2_097_152, PAGE_SIZE_BYTES)] page_size: usize) {
+    fn test_behave_like_hashmap(
+        #[values(1_048_576, 2_097_152, DEFAULT_PAGE_SIZE_BYTES)] page_size: usize,
+    ) {
         use std::collections::HashMap;
 
         let (dir, mut storage) = empty_storage_sized(page_size);
@@ -686,8 +704,7 @@ mod tests {
         drop(storage);
 
         // reopen storage
-        let storage =
-            BlobStore::<Payload>::open(dir.path().to_path_buf(), Some(page_size)).unwrap();
+        let storage = BlobStore::<Payload>::open(dir.path().to_path_buf()).unwrap();
 
         // asset same length
         assert_eq!(storage.tracker.read().mapping_len(), model_hashmap.len());
@@ -735,8 +752,8 @@ mod tests {
         {
             // the fitting page should be 64MB, so we should still have about 14MB of free space
             let free_blocks = storage.bitmask.read().free_blocks_for_page(1);
-            let min_expected = 1024 * 1024 * 13 / BLOCK_SIZE_BYTES;
-            let max_expected = 1024 * 1024 * 15 / BLOCK_SIZE_BYTES;
+            let min_expected = 1024 * 1024 * 13 / DEFAULT_BLOCK_SIZE_BYTES;
+            let max_expected = 1024 * 1024 * 15 / DEFAULT_BLOCK_SIZE_BYTES;
             assert!((min_expected..max_expected).contains(&free_blocks));
         }
 
@@ -762,8 +779,7 @@ mod tests {
         );
 
         {
-            let mut storage = BlobStore::new(path.clone(), None);
-
+            let mut storage = BlobStore::new(path.clone(), Default::default()).unwrap();
             storage.put_value(0, &payload);
             assert_eq!(storage.pages.len(), 1);
 
@@ -780,7 +796,7 @@ mod tests {
         }
 
         // reopen storage
-        let storage = BlobStore::<Payload>::open(path.clone(), None).unwrap();
+        let storage = BlobStore::<Payload>::open(path.clone()).unwrap();
         assert_eq!(storage.pages.len(), 1);
 
         let stored_payload = storage.get_value(0);
@@ -862,7 +878,7 @@ mod tests {
         drop(storage);
 
         // reopen storage
-        let mut storage = BlobStore::open(dir.path().to_path_buf(), None).unwrap();
+        let mut storage = BlobStore::open(dir.path().to_path_buf()).unwrap();
         assert_eq!(point_offset, EXPECTED_LEN as u32 * 2);
         assert_eq!(storage.pages.len(), 4);
         assert_eq!(storage.tracker.read().mapping_len(), EXPECTED_LEN * 2);

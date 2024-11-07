@@ -1,4 +1,3 @@
-use crate::blob_store::BLOCK_SIZE_BYTES;
 use crate::tracker::BlockOffset;
 use crate::utils_copied::madvise::{Advice, AdviceSetting};
 use crate::utils_copied::mmap_ops::{create_and_ensure_length, open_write_mmap};
@@ -44,11 +43,16 @@ impl Page {
     /// # Corruption
     ///
     /// If the block_offset and length of the value are already taken, this function will still overwrite the data.
-    pub fn write_value(&mut self, block_offset: u32, value: &[u8]) -> usize {
+    pub fn write_value(
+        &mut self,
+        block_offset: u32,
+        value: &[u8],
+        block_size_bytes: usize,
+    ) -> usize {
         // The size of the data cell containing the value
         let value_size = value.len();
 
-        let value_start = block_offset as usize * BLOCK_SIZE_BYTES;
+        let value_start = block_offset as usize * block_size_bytes;
 
         let value_end = value_start + value_size;
         // only write what fits in the page
@@ -75,8 +79,13 @@ impl Page {
     ///
     /// When the `block_offset` starts after the page ends
     ///
-    pub fn read_value(&self, block_offset: BlockOffset, length: u32) -> (&[u8], usize) {
-        let value_start = block_offset as usize * BLOCK_SIZE_BYTES;
+    pub fn read_value(
+        &self,
+        block_offset: BlockOffset,
+        length: u32,
+        block_size_bytes: usize,
+    ) -> (&[u8], usize) {
+        let value_start = block_offset as usize * block_size_bytes;
 
         let mmap_len = self.mmap.len();
 
