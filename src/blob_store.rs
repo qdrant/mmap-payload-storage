@@ -3,6 +3,7 @@ use crate::blob::Blob;
 use crate::config::{StorageConfig, StorageOptions};
 use crate::page::Page;
 use crate::tracker::{BlockOffset, PageId, PointOffset, Tracker, ValuePointer};
+use crate::utils_copied::file_operations::atomic_save_json;
 use crate::utils_copied::mmap_type;
 
 use lz4_flex::compress_prepend_size;
@@ -58,6 +59,8 @@ impl<V: Blob> BlobStore<V> {
         for bitmask_file in self.bitmask.read().files() {
             paths.push(bitmask_file);
         }
+        // config file
+        paths.push(self.base_path.join(CONFIG_FILENAME));
         paths
     }
 
@@ -69,27 +72,23 @@ impl<V: Blob> BlobStore<V> {
     ///
     /// `base_path` is the directory where the storage files will be stored.
     /// It should exist already.
-    pub fn new(base_path: PathBuf, options: StorageOptions) -> Result<Self, &'static str> {
+    pub fn new(base_path: PathBuf, options: StorageOptions) -> Result<Self, String> {
         if !base_path.exists() {
-            return Err("Base path does not exist");
+            return Err("Base path does not exist".to_string());
         }
         if !base_path.is_dir() {
-            return Err("Base path is not a directory");
+            return Err("Base path is not a directory".to_string());
         }
 
         let config = StorageConfig::try_from(options)?;
-
-        // write config to disk
         let config_path = base_path.join(CONFIG_FILENAME);
-        let file = std::fs::File::create(&config_path).unwrap();
-        serde_json::to_writer_pretty(file, &config).unwrap();
 
         let mut storage = Self {
             tracker: RwLock::new(Tracker::new(&base_path, None)),
             pages: Default::default(),
             bitmask: RwLock::new(Bitmask::create(&base_path, config.clone())),
             base_path,
-            config,
+            config: config.clone(),
             _value_type: std::marker::PhantomData,
         };
 
@@ -99,13 +98,16 @@ impl<V: Blob> BlobStore<V> {
         let page = Page::new(&path, storage.config.page_size_bytes);
         storage.pages.push(page);
 
+        // lastly, write config to disk to use as a signal that the storage has been created correctly
+        atomic_save_json(&config_path, &config).map_err(|err| err.to_string())?;
+
         Ok(storage)
     }
 
     /// Open an existing storage at the given path
     /// Returns None if the storage does not exist
     pub fn open(path: PathBuf) -> Option<Self> {
-        // read config file
+        // read config file first
         let config_path = path.join(CONFIG_FILENAME);
         let config_file = std::fs::File::open(&config_path).ok()?;
         let config: StorageConfig = serde_json::from_reader(config_file).ok()?;
