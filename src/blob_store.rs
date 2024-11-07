@@ -503,7 +503,6 @@ mod tests {
         assert_eq!(files[2].file_name().unwrap(), "bitmask.dat");
         assert_eq!(files[3].file_name().unwrap(), "gaps.dat");
         assert_eq!(files[4].file_name().unwrap(), "config.json");
-        
     }
 
     #[test]
