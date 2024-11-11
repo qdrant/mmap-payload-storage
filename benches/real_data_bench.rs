@@ -22,7 +22,7 @@ pub fn real_data_data_bench(c: &mut Criterion) {
                         Value::String(record.get(i).unwrap().to_string()),
                     );
                 }
-                storage.put_value(point_offset, &payload);
+                storage.put_value(point_offset, &payload).unwrap();
                 point_offset += 1;
             }
             assert_eq!(point_offset, expected_point_count);

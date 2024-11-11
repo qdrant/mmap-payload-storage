@@ -108,16 +108,17 @@ impl BitmaskGaps {
         }
     }
 
-    pub fn open(dir: &Path, config: StorageConfig) -> Self {
+    pub fn open(dir: &Path, config: StorageConfig) -> Result<Self, String> {
         let path = Self::file_path(dir);
-        let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false).unwrap();
-        let mmap_slice = unsafe { MmapSlice::from(mmap) };
+        let mmap = open_write_mmap(&path, AdviceSetting::from(Advice::Normal), false)
+            .map_err(|err| err.to_string())?;
+        let mmap_slice = unsafe { MmapSlice::try_from(mmap) }.map_err(|err| err.to_string())?;
 
-        Self {
+        Ok(Self {
             path,
             mmap_slice,
             config,
-        }
+        })
     }
 
     pub fn flush(&self) -> Result<(), mmap_type::Error> {
@@ -125,9 +126,12 @@ impl BitmaskGaps {
     }
 
     /// Extends the mmap file to fit the new regions
-    pub fn extend(&mut self, mut iter: impl ExactSizeIterator<Item = RegionGaps>) {
+    pub fn extend(
+        &mut self,
+        mut iter: impl ExactSizeIterator<Item = RegionGaps>,
+    ) -> Result<(), String> {
         if iter.len() == 0 {
-            return;
+            return Ok(());
         }
 
         // reopen the file with a larger size
@@ -137,13 +141,16 @@ impl BitmaskGaps {
 
         create_and_ensure_length(&self.path, new_length_in_bytes).unwrap();
 
-        let mmap = open_write_mmap(&self.path, AdviceSetting::from(Advice::Normal), false).unwrap();
+        let mmap = open_write_mmap(&self.path, AdviceSetting::from(Advice::Normal), false)
+            .map_err(|err| err.to_string())?;
 
-        self.mmap_slice = unsafe { MmapSlice::from(mmap) };
+        self.mmap_slice = unsafe { MmapSlice::try_from(mmap) }.map_err(|err| err.to_string())?;
 
         debug_assert_eq!(self.mmap_slice[prev_len..].len(), iter.len());
 
-        self.mmap_slice[prev_len..].fill_with(|| iter.next().unwrap())
+        self.mmap_slice[prev_len..].fill_with(|| iter.next().unwrap());
+
+        Ok(())
     }
 
     pub fn trailing_free_blocks(&self) -> u32 {
@@ -393,7 +400,7 @@ mod tests {
         // Reopen RegionGaps and verify gaps
         {
             let config = StorageOptions::default().try_into().unwrap();
-            let region_gaps = BitmaskGaps::open(dir_path, config);
+            let region_gaps = BitmaskGaps::open(dir_path, config).unwrap();
             assert_eq!(region_gaps.len(), gaps.len());
             for (i, gap) in gaps.iter().enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);
@@ -408,8 +415,8 @@ mod tests {
 
         {
             let config = StorageOptions::default().try_into().unwrap();
-            let mut region_gaps = BitmaskGaps::open(dir_path, config);
-            region_gaps.extend(more_gaps.clone().into_iter());
+            let mut region_gaps = BitmaskGaps::open(dir_path, config).unwrap();
+            region_gaps.extend(more_gaps.clone().into_iter()).unwrap();
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);
@@ -419,7 +426,7 @@ mod tests {
         // Reopen RegionGaps and verify all gaps
         {
             let config = StorageOptions::default().try_into().unwrap();
-            let region_gaps = BitmaskGaps::open(dir_path, config);
+            let region_gaps = BitmaskGaps::open(dir_path, config).unwrap();
             assert_eq!(region_gaps.len(), gaps.len() + more_gaps.len());
             for (i, gap) in gaps.iter().chain(more_gaps.iter()).enumerate() {
                 assert_eq!(region_gaps.get(i).unwrap(), gap);
