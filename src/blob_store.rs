@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 const CONFIG_FILENAME: &str = "config.json";
 
+pub(crate) type Result<T> = std::result::Result<T, String>;
+
 /// Storage for values of type `V`.
 ///
 /// Assumes sequential IDs to the values (0, 1, 2, 3, ...)
@@ -72,7 +74,7 @@ impl<V: Blob> BlobStore<V> {
     ///
     /// `base_path` is the directory where the storage files will be stored.
     /// It should exist already.
-    pub fn new(base_path: PathBuf, options: StorageOptions) -> Result<Self, String> {
+    pub fn new(base_path: PathBuf, options: StorageOptions) -> Result<Self> {
         if !base_path.exists() {
             return Err("Base path does not exist".to_string());
         }
@@ -86,7 +88,7 @@ impl<V: Blob> BlobStore<V> {
         let mut storage = Self {
             tracker: RwLock::new(Tracker::new(&base_path, None)),
             pages: Default::default(),
-            bitmask: RwLock::new(Bitmask::create(&base_path, config.clone())),
+            bitmask: RwLock::new(Bitmask::create(&base_path, config.clone())?),
             base_path,
             config: config.clone(),
             _value_type: std::marker::PhantomData,
@@ -95,7 +97,7 @@ impl<V: Blob> BlobStore<V> {
         // create first page to be covered by the bitmask
         let new_page_id = storage.next_page_id();
         let path = storage.page_path(new_page_id);
-        let page = Page::new(&path, storage.config.page_size_bytes);
+        let page = Page::new(&path, storage.config.page_size_bytes)?;
         storage.pages.push(page);
 
         // lastly, write config to disk to use as a signal that the storage has been created correctly
@@ -106,11 +108,12 @@ impl<V: Blob> BlobStore<V> {
 
     /// Open an existing storage at the given path
     /// Returns None if the storage does not exist
-    pub fn open(path: PathBuf) -> Option<Self> {
+    pub fn open(path: PathBuf) -> Result<Self> {
         // read config file first
         let config_path = path.join(CONFIG_FILENAME);
-        let config_file = std::fs::File::open(&config_path).ok()?;
-        let config: StorageConfig = serde_json::from_reader(config_file).ok()?;
+        let config_file = std::fs::File::open(&config_path).map_err(|err| err.to_string())?;
+        let config: StorageConfig =
+            serde_json::from_reader(config_file).map_err(|err| err.to_string())?;
 
         let page_tracker = Tracker::open(&path)?;
 
@@ -118,7 +121,6 @@ impl<V: Blob> BlobStore<V> {
 
         let num_pages = bitmask.infer_num_pages();
 
-        // load pages
         let mut storage = Self {
             tracker: RwLock::new(page_tracker),
             config,
@@ -127,13 +129,14 @@ impl<V: Blob> BlobStore<V> {
             base_path: path.clone(),
             _value_type: std::marker::PhantomData,
         };
+        // load pages
         for page_id in 0..num_pages as PageId {
             let page_path = storage.page_path(page_id);
-            let page = Page::open(&page_path).expect("Page not found");
+            let page = Page::open(&page_path)?;
 
             storage.pages.push(page);
         }
-        Some(storage)
+        Ok(storage)
     }
 
     /// Get the path for a given page id
@@ -186,15 +189,15 @@ impl<V: Blob> BlobStore<V> {
     /// If size is None, the page will have the default size
     ///
     /// Returns the new page id
-    fn create_new_page(&mut self) -> u32 {
+    fn create_new_page(&mut self) -> Result<u32> {
         let new_page_id = self.next_page_id();
         let path = self.page_path(new_page_id);
-        let page = Page::new(&path, self.config.page_size_bytes);
+        let page = Page::new(&path, self.config.page_size_bytes)?;
         self.pages.push(page);
 
-        self.bitmask.write().cover_new_page();
+        self.bitmask.write().cover_new_page()?;
 
-        new_page_id
+        Ok(new_page_id)
     }
 
     /// Get the mapping for a given point offset
@@ -202,12 +205,15 @@ impl<V: Blob> BlobStore<V> {
         self.tracker.read().get(point_offset)
     }
 
-    fn find_or_create_available_blocks(&mut self, num_blocks: u32) -> (PageId, BlockOffset) {
+    fn find_or_create_available_blocks(
+        &mut self,
+        num_blocks: u32,
+    ) -> Result<(PageId, BlockOffset)> {
         debug_assert!(num_blocks > 0, "num_blocks must be greater than 0");
 
         let bitmask_guard = self.bitmask.read();
         if let Some((page_id, block_offset)) = bitmask_guard.find_available_blocks(num_blocks) {
-            return (page_id, block_offset);
+            return Ok((page_id, block_offset));
         }
         // else we need new page(s)
         let trailing_free_blocks = bitmask_guard.trailing_free_blocks();
@@ -220,14 +226,17 @@ impl<V: Blob> BlobStore<V> {
         let num_pages =
             (missing_blocks * self.config.block_size_bytes).div_ceil(self.config.page_size_bytes);
         for _ in 0..num_pages {
-            self.create_new_page();
+            self.create_new_page()?;
         }
 
         // At this point we are sure that we have enough free pages to allocate the blocks
-        self.bitmask
+        let available = self
+            .bitmask
             .read()
             .find_available_blocks(num_blocks)
-            .unwrap()
+            .unwrap();
+
+        Ok(available)
     }
 
     /// Write value into a new cell, considering that it can span more than one page
@@ -260,7 +269,7 @@ impl<V: Blob> BlobStore<V> {
     /// Put a value in the storage.
     ///
     /// Returns true if the value existed previously and was updated, false if it was newly inserted.
-    pub fn put_value(&mut self, point_offset: PointOffset, value: &V) -> bool {
+    pub fn put_value(&mut self, point_offset: PointOffset, value: &V) -> Result<bool> {
         // This function needs to NOT corrupt data in case of a crash.
         //
         // Since we cannot know deterministically when a write is persisted without flushing explicitly,
@@ -314,7 +323,8 @@ impl<V: Blob> BlobStore<V> {
         let value_size = comp_value.len();
 
         let required_blocks = Self::blocks_for_value(value_size, self.config.block_size_bytes);
-        let (start_page_id, block_offset) = self.find_or_create_available_blocks(required_blocks);
+        let (start_page_id, block_offset) =
+            self.find_or_create_available_blocks(required_blocks)?;
 
         // insert into a new cell, considering that it can span more than one page
         self.write_into_pages(&comp_value, start_page_id, block_offset);
@@ -333,7 +343,7 @@ impl<V: Blob> BlobStore<V> {
         );
 
         // return whether it was an update or not
-        is_update
+        Ok(is_update)
     }
 
     /// Delete a value from the storage
@@ -392,7 +402,7 @@ impl<V> BlobStore<V> {
     }
 
     /// Flush all mmaps and pending updates to disk
-    pub fn flush(&self) -> Result<(), mmap_type::Error> {
+    pub fn flush(&self) -> std::result::Result<(), mmap_type::Error> {
         let mut bitmask_guard = self.bitmask.upgradable_read();
         bitmask_guard.flush()?;
         for page in &self.pages {
@@ -451,7 +461,7 @@ mod tests {
 
         // TODO: should we actually use the pages for empty values?
         let payload = Payload::default();
-        storage.put_value(0, &payload);
+        storage.put_value(0, &payload).unwrap();
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.tracker.read().mapping_len(), 1);
 
@@ -470,7 +480,7 @@ mod tests {
             serde_json::Value::String("value".to_string()),
         );
 
-        storage.put_value(0, &payload);
+        storage.put_value(0, &payload).unwrap();
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.tracker.read().mapping_len(), 1);
 
@@ -493,7 +503,7 @@ mod tests {
             serde_json::Value::String("value".to_string()),
         );
 
-        storage.put_value(0, &payload);
+        storage.put_value(0, &payload).unwrap();
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.tracker.read().mapping_len(), 1);
         let files = storage.files();
@@ -516,7 +526,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for (point_offset, payload) in payloads.iter() {
-            storage.put_value(*point_offset, payload);
+            storage.put_value(*point_offset, payload).unwrap();
 
             let stored_payload = storage.get_value(*point_offset);
             assert!(stored_payload.is_some());
@@ -542,7 +552,7 @@ mod tests {
             serde_json::Value::String("value".to_string()),
         );
 
-        storage.put_value(0, &payload);
+        storage.put_value(0, &payload).unwrap();
         assert_eq!(storage.pages.len(), 1);
 
         let page_mapping = storage.get_pointer(0).unwrap();
@@ -572,7 +582,7 @@ mod tests {
             serde_json::Value::String("value".to_string()),
         );
 
-        storage.put_value(0, &payload);
+        storage.put_value(0, &payload).unwrap();
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.tracker.read().mapping_len(), 1);
 
@@ -591,7 +601,7 @@ mod tests {
             serde_json::Value::String("updated".to_string()),
         );
 
-        storage.put_value(0, &updated_payload);
+        storage.put_value(0, &updated_payload).unwrap();
         assert_eq!(storage.pages.len(), 1);
         assert_eq!(storage.tracker.read().mapping_len(), 1);
 
@@ -605,7 +615,7 @@ mod tests {
         let page_size = DEFAULT_BLOCK_SIZE_BYTES * DEFAULT_REGION_SIZE_BLOCKS;
         let (_dir, mut storage) = empty_storage_sized(page_size);
 
-        storage.create_new_page();
+        storage.create_new_page().unwrap();
 
         let value_len = 1000;
 
@@ -671,7 +681,7 @@ mod tests {
         for operation in operations.into_iter() {
             match operation {
                 Operation::Put(point_offset, payload) => {
-                    storage.put_value(point_offset, &payload);
+                    storage.put_value(point_offset, &payload).unwrap();
                     model_hashmap.insert(point_offset, payload);
                 }
                 Operation::Delete(point_offset) => {
@@ -684,7 +694,7 @@ mod tests {
                     );
                 }
                 Operation::Update(point_offset, payload) => {
-                    storage.put_value(point_offset, &payload);
+                    storage.put_value(point_offset, &payload).unwrap();
                     model_hashmap.insert(point_offset, payload);
                 }
             }
@@ -738,7 +748,7 @@ mod tests {
             serde_json::Value::String(distr.sample_iter(rng).take(huge_payload_size).collect());
         payload.0.insert("huge".to_string(), huge_value);
 
-        storage.put_value(0, &payload);
+        storage.put_value(0, &payload).unwrap();
         assert_eq!(storage.pages.len(), 2);
 
         let page_mapping = storage.get_pointer(0).unwrap();
@@ -780,7 +790,7 @@ mod tests {
 
         {
             let mut storage = BlobStore::new(path.clone(), Default::default()).unwrap();
-            storage.put_value(0, &payload);
+            storage.put_value(0, &payload).unwrap();
             assert_eq!(storage.pages.len(), 1);
 
             let page_mapping = storage.get_pointer(0).unwrap();
@@ -821,7 +831,7 @@ mod tests {
                         serde_json::Value::String(record.get(i).unwrap().to_string()),
                     );
                 }
-                storage.put_value(point_offset, &payload);
+                storage.put_value(point_offset, &payload).unwrap();
                 point_offset += 1;
             }
             point_offset
@@ -892,11 +902,12 @@ mod tests {
         for i in (0..EXPECTED_LEN).rev() {
             let payload = storage.get_value(i as u32).unwrap();
             // move first write to the right
-            storage.put_value(i as u32 + offset, &payload);
+            storage.put_value(i as u32 + offset, &payload).unwrap();
             // move second write to the right
-            storage.put_value(i as u32 + offset + EXPECTED_LEN as u32, &payload);
+            storage
+                .put_value(i as u32 + offset + EXPECTED_LEN as u32, &payload)
+                .unwrap();
         }
-
         // assert storage is consistent after updating
         storage_double_pass_is_consistent(&storage, offset);
 

@@ -12,7 +12,7 @@ pub fn random_data_bench(c: &mut Criterion) {
             || random_payload(&mut rng, 2),
             |payload| {
                 for i in 0..PAYLOAD_COUNT {
-                    storage.put_value(i, payload);
+                    storage.put_value(i, payload).unwrap();
                 }
             },
             BatchSize::SmallInput,

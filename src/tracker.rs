@@ -116,15 +116,16 @@ impl Tracker {
 
     /// Open an existing PageTracker at the given path
     /// If the file does not exist, return None
-    pub fn open(path: &Path) -> Option<Self> {
+    pub fn open(path: &Path) -> Result<Self, String> {
         let path = Self::tracker_file_name(path);
         if !path.exists() {
-            return None;
+            return Err(format!("Tracker file does not exist: {}", path.display()));
         }
-        let mmap = open_write_mmap(&path, AdviceSetting::from(TRACKER_MEM_ADVICE), false).unwrap();
+        let mmap = open_write_mmap(&path, AdviceSetting::from(TRACKER_MEM_ADVICE), false)
+            .map_err(|err| err.to_string())?;
         let header: &TrackerHeader = transmute_from_u8(&mmap[0..size_of::<TrackerHeader>()]);
         let pending_updates = HashMap::new();
-        Some(Self {
+        Ok(Self {
             next_pointer_offset: header.next_pointer_offset,
             path,
             header: header.clone(),

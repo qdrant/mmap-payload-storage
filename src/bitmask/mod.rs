@@ -61,7 +61,7 @@ impl Bitmask {
     }
 
     /// Create a bitmask for one page
-    pub(crate) fn create(dir: &Path, config: StorageConfig) -> Self {
+    pub(crate) fn create(dir: &Path, config: StorageConfig) -> Result<Self, String> {
         debug_assert!(
             config.page_size_bytes % config.block_size_bytes * config.region_size_blocks == 0,
             "Page size must be a multiple of block size * region size"
@@ -72,8 +72,9 @@ impl Bitmask {
         // create bitmask mmap
         let path = Self::bitmask_path(dir);
         create_and_ensure_length(&path, length).unwrap();
-        let mmap = open_write_mmap(&path, AdviceSetting::from(DEFAULT_ADVICE), false).unwrap();
-        let mmap_bitslice = MmapBitSlice::from(mmap, 0);
+        let mmap = open_write_mmap(&path, AdviceSetting::from(DEFAULT_ADVICE), false)
+            .map_err(|err| err.to_string())?;
+        let mmap_bitslice = MmapBitSlice::try_from(mmap, 0).map_err(|err| err.to_string())?;
 
         assert_eq!(mmap_bitslice.len(), length * 8, "Bitmask length mismatch");
 
@@ -83,15 +84,15 @@ impl Bitmask {
 
         let mmap_region_gaps = BitmaskGaps::create(dir, region_gaps.into_iter(), config.clone());
 
-        Self {
+        Ok(Self {
             config,
             regions_gaps: mmap_region_gaps,
             bitslice: mmap_bitslice,
             path,
-        }
+        })
     }
 
-    pub(crate) fn open(dir: &Path, config: StorageConfig) -> Option<Self> {
+    pub(crate) fn open(dir: &Path, config: StorageConfig) -> Result<Self, String> {
         debug_assert!(
             config.page_size_bytes % config.block_size_bytes == 0,
             "Page size must be a multiple of block size"
@@ -99,14 +100,15 @@ impl Bitmask {
 
         let path = Self::bitmask_path(dir);
         if !path.exists() {
-            return None;
+            return Err(format!("Bitmask file does not exist: {}", path.display()));
         }
-        let mmap = open_write_mmap(&path, AdviceSetting::from(DEFAULT_ADVICE), false).unwrap();
+        let mmap = open_write_mmap(&path, AdviceSetting::from(DEFAULT_ADVICE), false)
+            .map_err(|err| err.to_string())?;
         let mmap_bitslice = MmapBitSlice::from(mmap, 0);
 
-        let bitmask_gaps = BitmaskGaps::open(dir, config.clone());
+        let bitmask_gaps = BitmaskGaps::open(dir, config.clone())?;
 
-        Some(Self {
+        Ok(Self {
             config,
             regions_gaps: bitmask_gaps,
             bitslice: mmap_bitslice,
@@ -132,7 +134,7 @@ impl Bitmask {
     }
 
     /// Extend the bitslice to cover another page
-    pub fn cover_new_page(&mut self) {
+    pub fn cover_new_page(&mut self) -> Result<(), String> {
         let extra_length = Self::length_for_page(&self.config);
 
         // flush outstanding changes
@@ -142,9 +144,10 @@ impl Bitmask {
         let previous_bitslice_len = self.bitslice.len();
         let new_length = (previous_bitslice_len / u8::BITS as usize) + extra_length;
         create_and_ensure_length(&self.path, new_length).unwrap();
-        let mmap = open_write_mmap(&self.path, AdviceSetting::from(DEFAULT_ADVICE), false).unwrap();
+        let mmap = open_write_mmap(&self.path, AdviceSetting::from(DEFAULT_ADVICE), false)
+            .map_err(|err| err.to_string())?;
 
-        self.bitslice = MmapBitSlice::from(mmap, 0);
+        self.bitslice = MmapBitSlice::try_from(mmap, 0).map_err(|err| err.to_string())?;
 
         // extend the region gaps
         let current_total_regions = self.regions_gaps.len();
@@ -159,7 +162,7 @@ impl Bitmask {
         let new_regions = expected_total_full_regions.saturating_sub(current_total_regions);
         let new_gaps =
             vec![RegionGaps::all_free(self.config.region_size_blocks as u16); new_regions];
-        self.regions_gaps.extend(new_gaps.into_iter());
+        self.regions_gaps.extend(new_gaps.into_iter())?;
 
         // update the previous last region gaps
         self.update_region_gaps(previous_bitslice_len - 1..previous_bitslice_len + 2);
@@ -169,6 +172,8 @@ impl Bitmask {
             self.bitslice.len(),
             "Bitmask length mismatch",
         );
+
+        Ok(())
     }
 
     fn range_of_page(&self, page_id: PageId) -> Range<usize> {
@@ -498,8 +503,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mut bitmask = super::Bitmask::create(dir.path(), options.try_into().unwrap());
-        bitmask.cover_new_page();
+        let mut bitmask = super::Bitmask::create(dir.path(), options.try_into().unwrap()).unwrap();
+        bitmask.cover_new_page().unwrap();
 
         assert_eq!(bitmask.bitslice.len() as u32, blocks_per_page * 2);
 

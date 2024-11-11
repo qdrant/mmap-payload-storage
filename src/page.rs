@@ -17,22 +17,24 @@ impl Page {
     }
 
     /// Create a new page at the given path
-    pub fn new(path: &Path, size: usize) -> Page {
-        create_and_ensure_length(path, size).unwrap();
-        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal), false).unwrap();
+    pub fn new(path: &Path, size: usize) -> Result<Page, String> {
+        create_and_ensure_length(path, size).map_err(|err| err.to_string())?;
+        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal), false)
+            .map_err(|err| err.to_string())?;
         let path = path.to_path_buf();
-        Page { path, mmap }
+        Ok(Page { path, mmap })
     }
 
     /// Open an existing page at the given path
     /// If the file does not exist, return None
-    pub fn open(path: &Path) -> Option<Page> {
+    pub fn open(path: &Path) -> Result<Page, String> {
         if !path.exists() {
-            return None;
+            return Err(format!("Page file does not exist: {}", path.display()));
         }
-        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal), false).unwrap();
+        let mmap = open_write_mmap(path, AdviceSetting::from(Advice::Normal), false)
+            .map_err(|err| err.to_string())?;
         let path = path.to_path_buf();
-        Some(Page { path, mmap })
+        Ok(Page { path, mmap })
     }
 
     /// Write a value into the page
