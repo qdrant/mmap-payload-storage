@@ -124,7 +124,7 @@ impl<V: Blob> BlobStore<V> {
         let mut storage = Self {
             tracker: RwLock::new(page_tracker),
             config,
-            pages: Default::default(),
+            pages: Vec::with_capacity(num_pages),
             bitmask: RwLock::new(bitmask),
             base_path: path.clone(),
             _value_type: std::marker::PhantomData,
