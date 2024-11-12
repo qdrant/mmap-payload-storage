@@ -34,7 +34,7 @@ impl SequentialCollectionHandle for PayloadStorage {
     }
 
     fn insert(&mut self, key: u32, payload: &Payload) -> bool {
-        !self.put_value(key, payload)
+        !self.put_value(key, payload).unwrap()
     }
 
     fn remove(&mut self, key: &u32) -> bool {
@@ -42,7 +42,7 @@ impl SequentialCollectionHandle for PayloadStorage {
     }
 
     fn update(&mut self, key: &u32, payload: &Payload) -> bool {
-        self.put_value(*key, payload)
+        self.put_value(*key, payload).unwrap()
     }
 
     fn flush(&self) -> bool {

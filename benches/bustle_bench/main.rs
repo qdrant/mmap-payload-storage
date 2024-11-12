@@ -1,5 +1,5 @@
 //! Implements Bustle traits for comparing performance against other kv stores.
-#[cfg(feature = "rocksdb")]
+#[cfg(feature = "bench_rocksdb")]
 use ::rocksdb::DB;
 use bustle::{Mix, Workload};
 use fixture::ArcStorage;
@@ -8,7 +8,7 @@ use blob_store::BlobStore;
 
 mod fixture;
 mod payload_storage;
-#[cfg(feature = "rocksdb")]
+#[cfg(feature = "bench_rocksdb")]
 mod rocksdb;
 
 type PayloadStorage = BlobStore<Payload>;
@@ -28,7 +28,7 @@ fn main() {
         println!("ValueStorage:");
         workload.run::<ArcStorage<PayloadStorage>>();
 
-        #[cfg(feature = "rocksdb")]
+        #[cfg(feature = "bench_rocksdb")]
         {
             println!("RocksDB:");
             workload.run::<ArcStorage<DB>>();
@@ -43,7 +43,7 @@ fn main() {
         println!("ValueStorage:");
         workload.run::<ArcStorage<PayloadStorage>>();
 
-        #[cfg(feature = "rocksdb")]
+        #[cfg(feature = "bench_rocksdb")]
         {
             println!("RocksDB:");
             workload.run::<ArcStorage<DB>>();
@@ -58,7 +58,7 @@ fn main() {
         println!("ValueStorage:");
         workload.run::<ArcStorage<PayloadStorage>>();
 
-        #[cfg(feature = "rocksdb")]
+        #[cfg(feature = "bench_rocksdb")]
         {
             println!("RocksDB:");
             workload.run::<ArcStorage<DB>>();
